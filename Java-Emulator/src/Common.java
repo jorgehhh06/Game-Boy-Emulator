@@ -16,27 +16,6 @@ public class Common {
 
     /* Modifica un solo bit sin alterar el resto */
     public static int BIT_SET(int a, int n, boolean on) {
-        if (on) {
-            return (a | (1 << n));
-        } else {
-            return (a & ~(1 << n));
-        }
-    }
-
-    /* Comprueba si un número se ubica entre dos valores, será de utilidad para el Bus */
-    public static boolean BETWEEN(int a, int b, int c) {
-        return (a >= b) && (a <= c);
-    }
-
-    /*
-     * Encontré que esta es la mejor manera de controlar el tiempo de ejecución del programa
-     */
-
-    public static void delay(int ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) { // Medida de seguridad
-            Thread.currentThread().interrupt();
-        }
+        return on ? (a | (1 << n)) : (a & ~(1 << n));
     }
 }
