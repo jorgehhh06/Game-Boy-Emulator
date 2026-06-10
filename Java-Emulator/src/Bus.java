@@ -24,6 +24,7 @@ public class Bus {
     public static MemoryMapped_IO io;
     public static Timer timer;
     public static PPU ppu = new PPU();
+    public static APU apu = new APU();
 
     public static void ready(MemoryMapped_IO ioInstance, DMA dmaInstance, Ram ramInstance, Interrupts intrpInstance, Timer timerInstance) {
         Bus.io = ioInstance;
@@ -43,6 +44,7 @@ public class Bus {
         }
         // 0x8000 - 0x9FFF: VRAM
         else if (address < 0xA000) {
+            if (ppu.get_vram_blocked()) return 0xFF;
             return ppu.vram_read(address);
         }
         // 0xA000 - 0xBFFF: Cartridge RAM (External)
@@ -59,7 +61,7 @@ public class Bus {
         }
         // 0xFE00 - 0xFE9F: OAM (Sprites)
         else if (address < 0xFEA0) {
-            if (dma.dma_transferring()) return 0xFF;
+            if (dma.dma_transferring() || ppu.get_oam_blocked()) return 0xFF;
             return ppu.oam_read(address);
         }
         // 0xFEA0 - 0xFEFF: Reservado / Inutilizable
@@ -90,6 +92,7 @@ public class Bus {
             currentCart.cart_write(address, value);
         }
         else if (address < 0xA000) {
+            if (ppu.get_vram_blocked()) return;
             ppu.vram_write(address, value);
         }
         else if (address < 0xC000) {
@@ -102,7 +105,7 @@ public class Bus {
             // Echo RAM - No se escribe
         }
         else if (address < 0xFEA0) {
-            if (dma.dma_transferring()) return;
+            if (dma.dma_transferring() || ppu.get_oam_blocked()) return;
             ppu.oam_write(address, value);
         }
         else if (address < 0xFF00) {

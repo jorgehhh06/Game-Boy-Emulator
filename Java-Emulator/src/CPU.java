@@ -70,11 +70,11 @@ public class CPU {
 
         boolean destIsMem; // Se escribirá en memoria o en registro
 
-        // -- HERRAMIENTAS DE DEBUGGING --
-
         boolean halted = false;
         boolean halt_bug = false;
+        boolean stopped = false;
     }
+    public void setStopped(boolean stopped) { CPUctx.stopped = stopped; }
 
     private CpuContext CPUctx = new CpuContext(); // Objeto de la CPU
 
@@ -111,6 +111,30 @@ public class CPU {
     // -- CICLO (FUNCIÓN DE TRANSICIÓN DEL AUTÓMATA FINITO) --
 
     public void cpu_step() {
+
+        if (CPUctx.stopped) {
+            // El hardware real despierta por la interrupción (Flanco)
+            // O si simplemente la línea ya está presionada (Nivel bajo)
+            boolean joypadInterrupt = (Bus.intrp.get_if_register() & (1 << Interrupts.JOYPAD)) != 0;
+            boolean buttonHeld = (MemoryMapped_IO.gamepad.read() & 0x0F) != 0x0F;
+
+            if (joypadInterrupt || buttonHeld) {
+                CPUctx.stopped = false;
+            } else {
+                return; // Si sigue dormida, el tiempo no avanza
+            }
+        }
+
+        if (CPUctx.halted) {
+            // HALT despierta si hay CUALQUIER interrupción pendiente (IE & IF != 0)
+            if (Bus.intrp.has_pending_interrupts()) {
+                CPUctx.halted = false;
+            } else {
+                cycle(4);
+                return; // Si sigue dormida, el oscilador sigue corriendo
+            }
+        }
+
         // Manejo de Interrupciones (Antes del Fetch)
         // Solo saltamos al vector si el Master Enable está activo
         if (Bus.intrp.get_master_enabled() && Bus.intrp.has_pending_interrupts()) {
@@ -121,15 +145,6 @@ public class CPU {
         // Actualizar el IME (EI tiene un retraso de 1 instrucción)
         Bus.intrp.update_ime();
 
-        // ¿Estamos en HALT?
-        if (CPUctx.halted) {
-            cycle(4);
-            // Despertar: Solo importa que haya una interrupción solicitada y habilitada
-            if (Bus.intrp.has_pending_interrupts()) {
-                CPUctx.halted = false;
-            }
-            return; // Salimos para que en el SIGUIENTE step evalúe handle_interrupts o fetch
-        }
 
         // FETCH NORMAL (O con HALT BUG)
         int pc_actual = CPUctx.regs.pc & 0xFFFF;
@@ -417,18 +432,11 @@ public class CPU {
         stack_push(data & 0xFF);
     }
 
-    public int stack_pop16(){
-        int lo = stack_pop(); // Little Endian
-        int hi = stack_pop();
-        return (hi << 8) | lo;
-    }
-
     // -- MANEJO DE INTERRUPCIONES --
 
     private void handle_interrupts() {
         // Intentamos consumir una interrupción (esto checa prioridades y limpia el flag IF)
         int vector = Bus.intrp.consume_interrupt();
-
         if (vector != -1) {
             // Si entramos aquí, es que hay una interrupción que DEBE atenderse
 
@@ -458,6 +466,5 @@ public class CPU {
             Bus.timer.timer_tick(); // Disparar interrupciones es importante
             Bus.dma.dma_tick(); // Primero se actualiza la PPU y luego el DMA puede actuar
         }
-
     }
 }

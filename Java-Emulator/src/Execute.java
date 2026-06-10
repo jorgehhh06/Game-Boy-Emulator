@@ -64,6 +64,7 @@ public class Execute {
                 }
 
                 if (instr.reg_1 == Instructions_Enum.RegType.RT_SP) {
+                    cpu.cycle(4);
                     // Si se trabaja con el SP, convertimos el número de 8 bits sin signo (u8)
                     // en un número con complemento a dos (byte - i8)
                     val = cpu.read_reg(instr.reg_1) + (byte)(cpu.getFetchData() & 0xFF);
@@ -146,7 +147,6 @@ public class Execute {
             case IN_RET: // Return
                 if (instr.cond != Instructions_Enum.CondType.CT_NONE) { // Condición del Return
                     cpu.cycle(4); // Delay si es condicional
-                    // Se requiere de 1 M-Cycle para hacer la consulta de las condiciones
                 }
                 // Ejecución
                 if (check_condition(cpu, instr.cond)) {
@@ -154,9 +154,6 @@ public class Execute {
                     int hi = cpu.stack_pop(); // stack_pop ya cobra 4 ticks
                     cpu.setPC(((hi << 8) | lo) & 0xFFFF);
                     cpu.cycle(4); // Se debió usar el bus para poner el PC
-                } else{
-                    // Tiempo que la CPU tarda en pasar a la siguiente instrucción después de fallar el intento de salto
-                    cpu.cycle(4);
                 }
                 break;
 
@@ -267,7 +264,11 @@ public class Execute {
                 break;
 
             case IN_JP: // Jump
-                goto_addr(cpu, cpu.getFetchData(), false, instr);
+                if (instr.mode == Instructions_Enum.AddrMode.AM_R) { // JP (HL)
+                    cpu.setPC(cpu.getFetchData()); // 4 ciclos totales, sin delay extra
+                } else {
+                    goto_addr(cpu, cpu.getFetchData(), false, instr);
+                }
                 break;
 
             case IN_JR: // Jump Relative
@@ -289,7 +290,7 @@ public class Execute {
             case IN_DI: // Disable Interrupts
                 cpu.setIntMasterEnabled(false);
                 break;
-            case IN_EI: // Enable Interrupts
+            case IN_EI:
                 cpu.setEnablingIme(true);
                 break;
 
@@ -329,8 +330,10 @@ public class Execute {
                 setFlags(cpu, 0, 0, 0, new_c);
                 break;
 
-            case IN_STOP: // Solo incrementa el PC
+            case IN_STOP:
                 cpu.setPC((cpu.getPC() + 1) & 0xFFFF);
+                cpu.setStopped(true);
+                Bus.timer.setDIV(0);
                 break;
 
             default:
@@ -344,10 +347,6 @@ public class Execute {
     private static void goto_addr(CPU cpu, int addr, boolean pushpc, Instruction instr) {
         if (check_condition(cpu, instr.cond)) {
             if (pushpc) {
-                // stack_push ya cobra 8 ticks en total
-                // agregamos 4 de delay por preparación de la instrucción
-                cpu.cycle(4);
-                // Agregar la dirección de memoria actual a la pila
                 int pc_to_push = cpu.getPC();
                 cpu.stack_push((pc_to_push >> 8) & 0xFF);
                 cpu.stack_push(pc_to_push & 0xFF);
@@ -396,56 +395,59 @@ public class Execute {
 
         // Carga normal entre registros
         cpu.write_reg(instr.reg_1, cpu.getFetchData());
+        // FIX: LD SP, HL (0xF9) toma 8 ciclos en total (4 decode + 4 internos).
+        if (instr.reg_1 == Instructions_Enum.RegType.RT_SP && instr.reg_2 == Instructions_Enum.RegType.RT_HL) {
+            cpu.cycle(4);
+        }
     }
 
     private static void execute_inc(CPU cpu, Instruction instr) {
+        // FIX: INC (HL) opera en 8 bits, no debe sufrir el delay de is16Bit()
+        if (instr.reg_1 == Instructions_Enum.RegType.RT_HL && instr.mode == Instructions_Enum.AddrMode.AM_MR) {
+            int val = (cpu.getFetchData() + 1) & 0xFF;
+            Bus.bus_write(cpu.read_reg(Instructions_Enum.RegType.RT_HL), val);
+            cpu.cycle(4);
+            setFlags(cpu, val == 0 ? 1 : 0, 0, (val & 0x0F) == 0 ? 1 : 0, -1);
+            return; // Salimos inmediatamente
+        }
+
         int val = (cpu.read_reg(instr.reg_1) + 1) & 0xFFFF;
 
         if (is16Bit(instr.reg_1)) {
-            cpu.cycle(4); // Trabajo extra por operaciones de 16 bits
+            cpu.cycle(4); // Trabajo extra por operaciones de 16 bits puros
         }
 
-        // Si es operación en memoria es INC [HL]
-        if (instr.reg_1 == Instructions_Enum.RegType.RT_HL && instr.mode == Instructions_Enum.AddrMode.AM_MR) {
-            val = (cpu.getFetchData() + 1) & 0xFF;
-            cpu.cycle(4);
-            Bus.bus_write(cpu.read_reg(Instructions_Enum.RegType.RT_HL), val);
-        } else {
-            cpu.write_reg(instr.reg_1, val);
-            val = cpu.read_reg(instr.reg_1);
-        }
+        cpu.write_reg(instr.reg_1, val);
+        val = cpu.read_reg(instr.reg_1);
 
-        // Si es una instrucción de 16 bits, salimos sin tocar flags
         if ((cpu.getCurOpcode() & 0x03) == 0x03) {
             return;
         }
-
         setFlags(cpu, val == 0 ? 1 : 0, 0, (val & 0x0F) == 0 ? 1 : 0, -1);
     }
 
     private static void execute_dec(CPU cpu, Instruction instr) {
-        // Misma lógica que execute_inc
+        // FIX: DEC (HL) opera en 8 bits, no debe sufrir el delay de is16Bit()
+        if (instr.reg_1 == Instructions_Enum.RegType.RT_HL && instr.mode == Instructions_Enum.AddrMode.AM_MR) {
+            int val = (cpu.getFetchData() - 1) & 0xFF;
+            Bus.bus_write(cpu.read_reg(Instructions_Enum.RegType.RT_HL), val);
+            cpu.cycle(4);
+            setFlags(cpu, val == 0 ? 1 : 0, 1, (val & 0x0F) == 0x0F ? 1 : 0, -1);
+            return; // Salimos inmediatamente
+        }
+
         int val = (cpu.read_reg(instr.reg_1) - 1) & 0xFFFF;
 
         if (is16Bit(instr.reg_1)) {
-            cpu.cycle(4); // Delay por trabajo de 16 bits
+            cpu.cycle(4); // Delay por trabajo de 16 bits puros
         }
 
-        // DEC [HL]
-        if (instr.reg_1 == Instructions_Enum.RegType.RT_HL && instr.mode == Instructions_Enum.AddrMode.AM_MR) {
-            val = (cpu.getFetchData() - 1) & 0xFF;
-            cpu.cycle(4);
-            Bus.bus_write(cpu.read_reg(Instructions_Enum.RegType.RT_HL), val);
-        } else {
-            cpu.write_reg(instr.reg_1, val);
-            val = cpu.read_reg(instr.reg_1);
-        }
+        cpu.write_reg(instr.reg_1, val);
+        val = cpu.read_reg(instr.reg_1);
 
-        // Salir sin tocar flags si es de 16 bits
         if ((cpu.getCurOpcode() & 0x0B) == 0x0B) {
             return;
         }
-
         setFlags(cpu, val == 0 ? 1 : 0, 1, (val & 0x0F) == 0x0F ? 1 : 0, -1);
     }
 

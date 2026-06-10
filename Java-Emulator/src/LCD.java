@@ -60,8 +60,9 @@ public class LCD {
 
     // 4 colores posibles del Game Boy, blanco puro (0xFFFFFFFF), gris claro (0xFFAAAAAA)
     // gris oscuro (0xFF555555) y negro puro (0xFF000000)
-    // 00 = blanco, 01 = gris claro, 10 = gris oscuro, 11 = negro, 2 bits para 4 colores
-    private static final int[] COLORS_DEFAULT = {0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000};
+    // 00 = blanco, 01 = gris claro, 10 = gris xoscuro, 11 = negro, 2 bits para 4 colores
+    private static final int[] COLORS_DEFAULT = {0xFF9BBC0F, 0xFF8BAC0F, 0xFF306230, 0xFF0F380F};
+    //private static final int[] COLORS_DEFAULT = {0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000};
 
     public int getLcdc() { return regs[0x00]; }
     public int getStat() { return regs[0x01]; }
@@ -115,8 +116,6 @@ public class LCD {
         if (offset >= 0 && offset < regs.length) {
             regs[offset] = val & 0xFF;
         }
-
-
 
         if (addr == 0xFF46) Bus.dma.dma_init(val);
         if (addr == 0xFF47) update_palette(val, 0);

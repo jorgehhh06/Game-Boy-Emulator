@@ -72,8 +72,6 @@ public class Interrupts {
         return (if_register & ie_register & 0x1F) != 0;
     }
 
-    private long ultimoTickVblank = 0;
-
     public int  consume_interrupt() {
         // Verificación de interrupciones
         if (!master_enabled) return -1;
@@ -89,11 +87,6 @@ public class Interrupts {
 
                 // Apagamos el Master Enable
                 master_enabled = false;
-                if (VECTORS[i] == 0x40) {
-                    long ticksActuales = Emu.emu_get_context().ticks;
-                    long diferencia = ticksActuales - ultimoTickVblank;
-                    ultimoTickVblank = ticksActuales;
-                }
                 // Devolvemos el vector
                 return VECTORS[i];
             }

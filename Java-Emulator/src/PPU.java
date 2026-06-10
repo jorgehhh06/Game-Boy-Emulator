@@ -17,8 +17,11 @@ public class PPU {
     // Contador interno para el dibujo de la Window
     public int window_line = 0;
 
-    // El Fetcher es el encargado de alimentar el pipeline de píxeles
-    //public PPU_Fetcher fetcher = new PPU_Fetcher();
+    // Contención de bus
+    private boolean vram_blocked;
+    private boolean oam_blocked;
+    public boolean get_vram_blocked(){ return vram_blocked;}
+    public boolean get_oam_blocked(){ return oam_blocked;}
 
     // Almacén para los 10 sprites máximos permitidos por línea (DMG hardware limitation)
     public List<SpriteEntry> lineSprites = new ArrayList<>();
@@ -71,6 +74,8 @@ public class PPU {
 
     // -- MODO 2: OAM SEARCH --
     private void ppu_mode_oam() {
+        oam_blocked = true;
+        vram_blocked = false;
         // En el primer tick de la línea, buscamos qué sprites deben dibujarse
         if (line_ticks == 1) scan_line_sprites();
 
@@ -88,6 +93,8 @@ public class PPU {
 
     // -- MODO 3: PIXEL TRANSFER --
     private void ppu_mode_xfer() {
+        oam_blocked = false;
+        vram_blocked = true;
         // El Fetcher procesa la lógica de VRAM y llena la FIFO
         fetcher.process();
 
@@ -100,6 +107,8 @@ public class PPU {
 
     // -- MODO 0: H-BLANK --
     private void ppu_mode_hblank() {
+        oam_blocked = false;
+        vram_blocked = false;
         if (line_ticks >= 456) {
             line_ticks = 0; // Reiniciamos ticks primero
             step_ly();      // Esto incrementa LY
@@ -123,6 +132,8 @@ public class PPU {
 
     // -- MODO 1: V-BLANK --
     private void ppu_mode_vblank() {
+        oam_blocked = false;
+        vram_blocked = false;
         if (line_ticks >= 456) {
             step_ly(); // Continuar contando líneas hasta 153
 

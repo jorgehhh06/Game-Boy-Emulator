@@ -1,71 +1,95 @@
 public class Timer {
-    private int internalDivider = 0xAC00;
-    private int timerCounter = 0;
-    private int timerModulo = 0;
-    private int timerControl = 0;
+    // Actúa como el System Counter de 16 bits, incrementando cada T-Cycle
+    private int DIV = 0xAC00;
 
-    // -- Contador de T-Cycles para sincronizar con M-Cycles --
-    private int internal_cnt = 0;
+    private int TIMA = 0;
+    private int TMA = 0;
+    private int TAC = 0;
+
+    // Estado para el retraso del hardware
+    private boolean timaOverflowing = false;
+    private int overflowDelay = 0;
+
+    public void setDIV(int DIV) {
+        this.DIV = DIV;
+    }
+
+    private int getTimerMultiplexerSignal(int divider, int control) {
+        if ((control & 0b100) == 0) return 0;
+
+        int bitPos = switch (control & 0b11) {
+            case 0b00 -> 9;  // 4096 Hz
+            case 0b01 -> 3;  // 262144 Hz
+            case 0b10 -> 5;  // 65536 Hz
+            case 0b11 -> 7;  // 16384 Hz
+            default -> 9;
+        };
+
+        return (divider >> bitPos) & 1;
+    }
 
     public void timer_tick() {
-        // El Divider interno (DIV) aumenta cada 1 M-Cycle (4 T-Cycles)
-        // Como CPU llama a cycle() por cada T-Cycle, filtramos aquí
-        internal_cnt++;
-        if (internal_cnt < 4) {
-            return;
-        }
-        internal_cnt = 0;
-
-        // Guarda el valor del contador viejo y nuevo para poder compararlos
-        int previousDivider = internalDivider;
-        internalDivider = (internalDivider + 1) & 0xFFFF;
-
-        boolean shouldIncrementTimer = false;
-
-        // Selección de bit de frecuencia (Bits 0-1 de timerControl)
-        switch (timerControl & 0b11) {
-            // Detección de flanco de bajada (de 1 a 0) en el bit correspondiente
-            case 0b00 -> shouldIncrementTimer = (previousDivider & (1 << 9)) != 0
-                    && (internalDivider & (1 << 9)) == 0;
-            case 0b01 -> shouldIncrementTimer = (previousDivider & (1 << 3)) != 0
-                    && (internalDivider & (1 << 3)) == 0;
-            case 0b10 -> shouldIncrementTimer = (previousDivider & (1 << 5)) != 0
-                    && (internalDivider & (1 << 5)) == 0;
-            case 0b11 -> shouldIncrementTimer = (previousDivider & (1 << 7)) != 0
-                    && (internalDivider & (1 << 7)) == 0;
-        }
-
-        // Si hay flanco de bajada y el bit 2 de TAC (0xFF07) es 1 (Timer Enabled)
-        if (shouldIncrementTimer && (timerControl & 0b100) != 0) {
-            timerCounter++;
-
-            // Si el contador (TIMA) se desborda (pasa de 255 a 256)
-            if (timerCounter > 0xFF) {
-                // Se recarga con el valor del Modulo (TMA)
-                timerCounter = timerModulo;
-
-                // Solicitamos interrupción de Timer (Bit 2 del IF)
+        // Manejo del retraso de 4 T-Cycles (1 M-Cycle) al desbordar TIMA
+        if (timaOverflowing) {
+            overflowDelay++;
+            if (overflowDelay >= 4) {
+                TIMA = TMA;
                 Bus.intrp.request_interrupt(Interrupts.TIMER);
+                timaOverflowing = false;
+                overflowDelay = 0;
             }
+        }
+
+        int prevSignal = getTimerMultiplexerSignal(DIV, TAC);
+
+        //System Counter libre a ritmo de T-Cycle
+        DIV = (DIV + 1) & 0xFFFF;
+
+        int currentSignal = getTimerMultiplexerSignal(DIV, TAC);
+        if (prevSignal == 1 && currentSignal == 0) {
+            increment_tima();
+        }
+    }
+
+    private void increment_tima() {
+        TIMA++;
+        if (TIMA > 0xFF) {
+            TIMA = 0x00;
+            timaOverflowing = true;
+            overflowDelay = 0;
         }
     }
 
     public int timer_read(int address) {
         return switch (address) {
-            case 0xFF04 -> (internalDivider >> 8) & 0xFF; // Los 8 bits altos del contador interno son el registro DIV
-            case 0xFF05 -> timerCounter & 0xFF;
-            case 0xFF06 -> timerModulo & 0xFF;
-            case 0xFF07 -> timerControl & 0xFF;
+            case 0xFF04 -> (DIV >> 8) & 0xFF; // >> 8 hace que div corra a la velocidad correcta de 16,384Hz
+            case 0xFF05 -> TIMA & 0xFF;
+            case 0xFF06 -> TMA & 0xFF;
+            case 0xFF07 -> TAC & 0xFF;
             default -> 0;
         };
     }
 
     public void timer_write(int address, int value) {
+        int prevSignal = getTimerMultiplexerSignal(DIV, TAC);
+
         switch (address) {
-            case 0xFF04 -> internalDivider = 0; // Escribir cualquier cosa a DIV lo resetea a 0
-            case 0xFF05 -> timerCounter = value & 0xFF;
-            case 0xFF06 -> timerModulo = value & 0xFF;
-            case 0xFF07 -> timerControl = value & 0xFF;
+            case 0xFF04 -> DIV = 0;
+            case 0xFF05 -> {
+                // Cancelar desbordamiento si la CPU escribe justo a tiempo (Obscure Behavior)
+                if (timaOverflowing) {
+                    timaOverflowing = false;
+                    overflowDelay = 0;
+                }
+                TIMA = value & 0xFF;
+            }
+            case 0xFF06 -> TMA = value & 0xFF;
+            case 0xFF07 -> TAC = value & 0xFF;
+        }
+
+        int currentSignal = getTimerMultiplexerSignal(DIV, TAC);
+        if (prevSignal == 1 && currentSignal == 0) {
+            increment_tima();
         }
     }
 }

@@ -4,10 +4,6 @@
  */
 
 public class MemoryMapped_IO {
-
-    // Link Cable, comunicación entre dos consolas mediante un protocolo tipo SPI
-    private static int[] serial_data = new int[2];
-
     // Referencias a los componentes (ajusta los nombres según tus clases)
 
     //public static Interrupts intrp;
@@ -21,13 +17,6 @@ public class MemoryMapped_IO {
         if (address == 0xFF00) {
             return MemoryMapped_IO.gamepad.read();
         }
-        // 0xFF01 - 0xFF02: Serial Data
-        else if (address == 0xFF01) {
-            return serial_data[0];
-        }
-        else if (address == 0xFF02) {
-            return serial_data[1];
-        }
         // 0xFF04 - 0xFF07: Timer
         else if (address >= 0xFF04 && address <= 0xFF07) {
             return Bus.timer.timer_read(address);
@@ -36,9 +25,9 @@ public class MemoryMapped_IO {
         else if (address == 0xFF0F) {
             return Bus.intrp.get_if_register();
         }
-        // 0xFF10 - 0xFF3F: Sound (Ignorado por ahora)
+        // 0xFF10 - 0xFF3F: Sound
         else if (address >= 0xFF10 && address <= 0xFF3F) {
-            return 0;
+            return Bus.apu.apu_read(address);
         }
         // 0xFF40 - 0xFF4B: LCD / PPU Registers
         else if (address >= 0xFF40 && address <= 0xFF4B) {
@@ -57,13 +46,6 @@ public class MemoryMapped_IO {
         if (address == 0xFF00) {
             MemoryMapped_IO.gamepad.write(value);
         }
-        // 0xFF01 - 0xFF02: Serial Data
-        else if (address == 0xFF01) {
-            serial_data[0] = value;
-        }
-        else if (address == 0xFF02) {
-            serial_data[1] = value;
-        }
         // 0xFF04 - 0xFF07: Timer
         else if (address >= 0xFF04 && address <= 0xFF07) {
             Bus.timer.timer_write(address, value);
@@ -72,9 +54,9 @@ public class MemoryMapped_IO {
         else if (address == 0xFF0F) {
             Bus.intrp.set_if_register(value);
         }
-        // 0xFF10 - 0xFF3F: Sound (Ignorado de momento)
+        // 0xFF10 - 0xFF3F: Sound
         else if (address >= 0xFF10 && address <= 0xFF3F) {
-            // No hacemos nada
+            Bus.apu.apu_write(address, value);
         }
         // 0xFF40 - 0xFF4B: LCD / PPU Registers
         else if (address >= 0xFF40 && address <= 0xFF4B) {
