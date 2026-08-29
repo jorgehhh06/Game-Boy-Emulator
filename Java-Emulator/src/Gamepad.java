@@ -8,6 +8,7 @@ public class Gamepad {
     private boolean buttonSelected = false;
     private boolean dpadSelected = false;
 
+    // Los botones funcionan invertidos, 1 significa no presionado, 0 significa presionado
     private int dpadState = 0x0F;
     private int buttonState = 0x0F;
 
@@ -16,6 +17,7 @@ public class Gamepad {
 
     public void write(int value) {
         // En el hardware, 0 significa "Seleccionado"
+        // Presionar los botones cambia el valor del registro en memoria
         buttonSelected = (value & 0x20) == 0;
         dpadSelected = (value & 0x10) == 0;
 
@@ -26,9 +28,11 @@ public class Gamepad {
 
     public int read() {
         // En el GB real, los bits 6 y 7 siempre devuelven 1
+        // state es el registro en memoria
         int state = 0xCF;
 
         // Reflejamos qué fila está seleccionada en los bits 4 y 5
+        // Los bits 0-3 son para los botones, los bits 4 y 5 controlan si se lee botones o dpad
         if (!buttonSelected) state |= 0x20;
         if (!dpadSelected)   state |= 0x10;
 

@@ -64,12 +64,6 @@ public class PPU {
             case 0 -> ppu_mode_hblank(); // H-Blank
             case 1 -> ppu_mode_vblank(); // V-Blank
         }
-
-        // Si el modo cambió de 2 a 3 durante este tick,
-        // ejecutamos el primer proceso del fetcher de inmediato para no perder sincronía.
-        if (mode == 2 && getMode() == 3) {
-            ppu_mode_xfer();
-        }
     }
 
     // -- MODO 2: OAM SEARCH --
@@ -93,7 +87,7 @@ public class PPU {
 
     // -- MODO 3: PIXEL TRANSFER --
     private void ppu_mode_xfer() {
-        oam_blocked = false;
+        oam_blocked = true;
         vram_blocked = true;
         // El Fetcher procesa la lógica de VRAM y llena la FIFO
         fetcher.process();
@@ -188,20 +182,20 @@ public class PPU {
      */
     private void step_ly() {
         // Lógica de Window interna
+        // Si la ventana es visible y está en la zona de dibujarse
         if (isWinVisible() && MemoryMapped_IO.lcd.getLy() >= MemoryMapped_IO.lcd.getWinY()) {
             window_line++;
         }
         MemoryMapped_IO.lcd.setLy(MemoryMapped_IO.lcd.getLy() + 1);
 
-
         // Lógica de coincidencia LY == LYC (Bit 2 del STAT)
         if (MemoryMapped_IO.lcd.getLy() == MemoryMapped_IO.lcd.getLyc()) {
-            MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() | 0x04);
+            MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() | 0x04); // Ponemos el bit 2 en 1
             if ((MemoryMapped_IO.lcd.getStat() & 0x40) != 0) {
                 Bus.intrp.request_interrupt(Interrupts.LCD_STAT); // STAT INT por LYC
             }
         } else {
-            MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() & ~0x04);
+            MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() & ~0x04); // Si LY != LYC mantenemos apagado el bit 2
         }
     }
 

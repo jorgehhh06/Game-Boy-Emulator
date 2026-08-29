@@ -1,3 +1,7 @@
+/*
+* Lógica de la ventana y de los controles, es la interfaz entre el emulador y el mundo real
+*/
+
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.KeyEvent;

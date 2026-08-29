@@ -1,10 +1,13 @@
 public class Timer {
     // Actúa como el System Counter de 16 bits, incrementando cada T-Cycle
+    // Solo los 8 bits superiores del registro DIV están expuestos a memoria
+    // DIV incrementa en 1 cada T-Cycle
     private int DIV = 0xAC00;
 
-    private int TIMA = 0;
-    private int TMA = 0;
-    private int TAC = 0;
+    private int TIMA = 0; // Lanza interrupción de TIMER al desbordarse
+    private int TMA = 0; // Valor al que regresa TIMA tras overflow
+    private int TAC = 0; // Controla el TIMER
+    // Bit 2 de TAC es el Timer Enable, los bits 0 y 1 determinan el bit de DIV a mirar
 
     // Estado para el retraso del hardware
     private boolean timaOverflowing = false;
@@ -17,6 +20,7 @@ public class Timer {
     private int getTimerMultiplexerSignal(int divider, int control) {
         if ((control & 0b100) == 0) return 0;
 
+        // Multiplexor 4x1 que controla el bit de DIV a observar
         int bitPos = switch (control & 0b11) {
             case 0b00 -> 9;  // 4096 Hz
             case 0b01 -> 3;  // 262144 Hz
@@ -31,9 +35,9 @@ public class Timer {
     public void timer_tick() {
         // Manejo del retraso de 4 T-Cycles (1 M-Cycle) al desbordar TIMA
         if (timaOverflowing) {
-            overflowDelay++;
+            overflowDelay++; // Delay de 4 T-Cycles
             if (overflowDelay >= 4) {
-                TIMA = TMA;
+                TIMA = TMA; // TIMA regresa al valor de TMA
                 Bus.intrp.request_interrupt(Interrupts.TIMER);
                 timaOverflowing = false;
                 overflowDelay = 0;
@@ -53,7 +57,7 @@ public class Timer {
 
     private void increment_tima() {
         TIMA++;
-        if (TIMA > 0xFF) {
+        if (TIMA > 0xFF) { // Si TIMA hace overflow, se lanza interrupción
             TIMA = 0x00;
             timaOverflowing = true;
             overflowDelay = 0;
@@ -74,7 +78,7 @@ public class Timer {
         int prevSignal = getTimerMultiplexerSignal(DIV, TAC);
 
         switch (address) {
-            case 0xFF04 -> DIV = 0;
+            case 0xFF04 -> DIV = 0; // Escribir en DIV lo pone en 0
             case 0xFF05 -> {
                 // Cancelar desbordamiento si la CPU escribe justo a tiempo (Obscure Behavior)
                 if (timaOverflowing) {
@@ -87,6 +91,7 @@ public class Timer {
             case 0xFF07 -> TAC = value & 0xFF;
         }
 
+        // TIMA se incrementa en el flanco de bajada
         int currentSignal = getTimerMultiplexerSignal(DIV, TAC);
         if (prevSignal == 1 && currentSignal == 0) {
             increment_tima();

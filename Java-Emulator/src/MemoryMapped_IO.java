@@ -4,6 +4,9 @@
  */
 
 public class MemoryMapped_IO {
+    // Referencias a los componentes
+
+    //public static Interrupts intrp;
     public static Gamepad gamepad;
     public static LCD lcd;
 

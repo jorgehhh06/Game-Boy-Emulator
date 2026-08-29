@@ -70,7 +70,7 @@ public class Bus {
         }
         // 0xFF00 - 0xFF7F: I/O Registers
         else if (address < 0xFF80) {
-            // Caso especial para el registro IF que a veces da lata en el rango
+            // Caso especial para el registro IF
             if (address == 0xFF0F) return Bus.intrp.get_if_register();
             return io.io_read(address);
         }

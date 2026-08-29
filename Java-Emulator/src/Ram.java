@@ -21,7 +21,7 @@ public class Ram {
 
     // Escribir en HRAM
     public void write_hram(int address, int value) {
-        address -= 0xFF80; // ¡USA LA RESTA!
+        address -= 0xFF80;
         if (address >= 0 && address < 0x80) {
             hram[address] = value & 0xFF;
         }
@@ -29,7 +29,7 @@ public class Ram {
 
     // Leer de HRAM
     public int read_hram(int address) {
-        address -= 0xFF80; // ¡USA LA RESTA!
+        address -= 0xFF80;
         if (address >= 0 && address < 0x80) {
             return hram[address];
         }

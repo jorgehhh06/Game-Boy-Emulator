@@ -82,19 +82,13 @@ public class LCD {
 
     // 0xFF4A - Window Y Position (WY)
     public int getWy() {
-        // Si usas un arreglo 'regs' donde el índice 0 es 0xFF40:
         return regs[0x0A] & 0xFF;
-
-        // (Si no usas un arreglo 'regs', sino que lees del Bus, sería:
-        // return Bus.bus_read(0xFF4A) & 0xFF;)
     }
 
     // 0xFF4B - Window X Position + 7 (WX)
     public int getWx() {
         return regs[0x0B] & 0xFF;
     }
-
-
 
     public int lcd_read(int addr) {
         int offset = addr - 0xFF40;
@@ -109,6 +103,8 @@ public class LCD {
             // Protegemos bits 0-2 (Modo y LYC) para que la CPU no los borre
             int mask = 0b01111000;
             int currentStat = regs[0x01];
+            // Al valor nuevo se le borran los 3 bits inferiores que marcan el estado de la máquina
+            // y con el operador OR se combina con el estado viejo de la máquina
             regs[0x01] = (val & mask) | (currentStat & 0x07);
             return;
         }
@@ -127,6 +123,7 @@ public class LCD {
     // Definición de la paleta
     private void update_palette(int data, int pal) {
         // Selección de la paleta (puntero de referencia)
+        // p apunta a la dirección de memoria de los arreglos de la paleta
         int[] p = (pal == 1) ? sp1_colors : (pal == 2) ? sp2_colors : bg_colors;
 
         // A cada elemento de la paleta le asigna 1 de los 4 colores posibles

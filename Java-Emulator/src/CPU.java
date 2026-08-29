@@ -169,12 +169,15 @@ public class CPU {
             CPUctx.curInst = CB_InstructionTable.get_cb_instruction_by_opcode(cbOpcode);
             fetch_data();
             CB_Execute.process(this, CPUctx.curInst);
+            //System.out.print("CB - ");
         } else {
             CPUctx.curOpcode = opcode;
             CPUctx.curInst = InstructionTable.get_instruction_by_opcode(opcode);
             fetch_data();
             Execute.process(this, CPUctx.curInst, CPUctx.destIsMem);
         }
+
+        //System.out.printf("PC: 0x%04X  OPCODE: 0x%02X\n", pc_actual, CPUctx.curOpcode, CPUctx.curInst.type);
 
         // Validación y Log
         if (CPUctx.curInst == null || CPUctx.curInst.type == Instructions_Enum.InType.IN_ERR) {
@@ -465,6 +468,7 @@ public class CPU {
             Bus.ppu.ppu_tick(); // La PPU es muy sensible al timing
             Bus.timer.timer_tick(); // Disparar interrupciones es importante
             Bus.dma.dma_tick(); // Primero se actualiza la PPU y luego el DMA puede actuar
+            Bus.apu.apu_tick();
         }
     }
 }
