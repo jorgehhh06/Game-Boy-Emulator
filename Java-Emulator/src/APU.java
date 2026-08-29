@@ -190,7 +190,6 @@ public class APU {
         audio_buffer[buffer_pos++] = (byte) scaled_right;
 
         if (buffer_pos >= audio_buffer.length) {
-            // CORRECCIÓN 1: Enviar clon del buffer al hilo secundario sin bloquear
             audioQueue.offer(audio_buffer.clone());
             buffer_pos = 0;
         }
