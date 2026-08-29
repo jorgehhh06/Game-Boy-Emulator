@@ -48,7 +48,6 @@ public class APU {
             audioLine.open(format, 4096);
             audioLine.start();
 
-            // CORRECCIÓN 1: Hilo dedicado de audio. Evita que .write() congele tu emulador
             Thread audioThread = new Thread(() -> {
                 while (isRunning) {
                     byte[] data = audioQueue.poll();
