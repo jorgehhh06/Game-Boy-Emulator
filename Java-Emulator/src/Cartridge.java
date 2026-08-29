@@ -4,7 +4,7 @@ import java.nio.file.Paths;
 
 /*
  * Extrae la información del cartucho y se encarga de gestionar los datos de lectura/escritura, guardado y memory banking.
- * Ahora soporta MBC1, MBC3 y MBC5.
+ * Ahora soporta MBC1, MBC2, MBC3 y MBC5.
  */
 
 public class Cartridge {
