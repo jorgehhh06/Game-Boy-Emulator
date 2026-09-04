@@ -119,8 +119,6 @@ public class Emu {
                     // No hacemos nada, solo observamos el reloj
                 }
             }
-
-            // FIX: Previene la "Espiral de la Muerte".
             // Reseteamos el reloj al tiempo real actual, no al teórico.
             last_frame_time = System.nanoTime();
         }
