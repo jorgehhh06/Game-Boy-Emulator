@@ -1,5 +1,4 @@
 import javax.sound.sampled.*;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class APU {
 
@@ -24,70 +23,66 @@ public class APU {
     private NoiseChannel ch4 = new NoiseChannel();
 
     // -- RELOJES --
-    private int frame_sequencer_timer = 0;
-    private int frame_sequencer_step = 0;
+    private int frame_sequencer_timer = 0; // 512 Hz, basado en el timer de la consola
+    private int frame_sequencer_step = 0; // Estados de FSMs
 
+    // Contador de ciclos de Game Boy que han pasado desde la última vez que generé una muestra
     private int sample_timer = 0;
-    private static final int SAMPLE_RATE = 44100;
-    private static final int TICKS_PER_SAMPLE = 4194304 / SAMPLE_RATE;
+    private static final int SAMPLE_RATE = 44100; // 44,100 Hz actuales
+    private static final int TICKS_PER_SAMPLE = 4194304 / SAMPLE_RATE; // Reloj de la consola / sample rate
 
-    // -- JAVA SOUND API Y MULTITHREADING --
+    // -- JAVA SOUND API --
     private SourceDataLine audioLine;
-    private byte[] audio_buffer = new byte[2048];
+    // Buffer interno más pequeño para tener menos latencia (256 frames de audio)
+    private byte[] audio_buffer = new byte[512];
     private int buffer_pos = 0;
-
-    // Cola concurrente para no bloquear el CPU del emulador
-    private final ConcurrentLinkedQueue<byte[]> audioQueue = new ConcurrentLinkedQueue<>();
-    private volatile boolean isRunning = true;
 
     public APU() {
         try {
+            // 8 bits por muestra, dos canales, entero sin signo, little endian
             AudioFormat format = new AudioFormat(SAMPLE_RATE, 8, 2, false, false);
             DataLine.Info info = new DataLine.Info(SourceDataLine.class, format);
             audioLine = (SourceDataLine) AudioSystem.getLine(info);
-            audioLine.open(format, 4096);
+            // Reducimos el buffer de la tarjeta de sonido a 2048 para que reaccione más rápido
+            audioLine.open(format, 2048);
             audioLine.start();
-
-            Thread audioThread = new Thread(() -> {
-                while (isRunning) {
-                    byte[] data = audioQueue.poll();
-                    if (data != null) {
-                        audioLine.write(data, 0, data.length);
-                    } else {
-                        try { Thread.sleep(1); } catch (InterruptedException ignored) {}
-                    }
-                }
-            });
-            audioThread.setDaemon(true);
-            audioThread.start();
-
         } catch (Exception e) {
-            System.err.println("Error al inicializar el audio en Java");
+            System.err.println("Error al inicializar el audio");
             e.printStackTrace();
         }
     }
 
     // -- LECTURA Y ESCRITURA MMIO --
     public int apu_read(int addr) {
+        // Ram del canal 3
         if (addr >= 0xFF30 && addr <= 0xFF3F) {
             return wave_ram[addr - 0xFF30];
         }
         int offset = addr - 0xFF10;
 
+        // NR52
         if (addr == 0xFF26) {
-            int res = regs[offset] & 0x80;
-            res |= 0x70;
-            if (ch1.enabled) res |= 1;
-            if (ch2.enabled) res |= 2;
-            if (ch3.enabled) res |= 4;
-            if (ch4.enabled) res |= 8;
+            /*
+            Bit 7: Apagado/Encendido
+            Bit 4 a 6: Resistencias pull up
+            Bit 0 a 3: Banderas de actividad de cada canal
+            */
+            int res = regs[offset] & 0x80; // Aislar el bit 7
+            res |= 0x70; // Se hace pull up a los bits 4-6
+            if (ch1.enabled) res |= 1; // Bit 0 = Canal 1
+            if (ch2.enabled) res |= 2; // Bit 1 = Canal 2
+            if (ch3.enabled) res |= 4; // Bit 2 = Canal 3
+            if (ch4.enabled) res |= 8; // Bit 3 = Canal 4
             return res;
         }
+
+        // Máscaras para replicar los pull up
         return regs[offset] | READ_MASKS[offset];
     }
 
     public void apu_write(int addr, int val) {
         val &= 0xFF;
+        // Ram del canal 3
         if (addr >= 0xFF30 && addr <= 0xFF3F) {
             wave_ram[addr - 0xFF30] = val;
             return;
@@ -95,9 +90,11 @@ public class APU {
 
         int offset = addr - 0xFF10;
 
+        // NR52
         if (addr == 0xFF26) {
-            regs[offset] = val & 0x80;
-            if ((val & 0x80) == 0) {
+            regs[offset] = val & 0x80; // Bit de encendido
+            if ((val & 0x80) == 0) { // Si está apagado
+                // Todos los registros se ponen en 0
                 for (int i = 0; i < 0x30; i++) regs[i] = 0;
                 ch1.enabled = false; ch2.enabled = false;
                 ch3.enabled = false; ch4.enabled = false;
@@ -105,16 +102,23 @@ public class APU {
             return;
         }
 
+        // Si el bit 7 de NR52 es 0, no hace nada
         if ((regs[0x16] & 0x80) == 0) return;
 
         regs[offset] = val;
 
+        // Los dos bits de arriba controlan cuál de los 4 ciclos de trabajo utilizar
+        // A los canales 1, 2 y 4 les dieron 6 bits (64 valores posibles) para utilizar
+        // Al canal 3 le dieron un byte entero
+        // Los contadores son up counters, si el canal debe sonar por 4 ticks se pone 60
+        // y la máquina cuenta 60 -> 61 -> 62 -> 63 -> 64 -> se apaga el canal por overflow
         if (addr == 0xFF11) ch1.length_counter = 64 - (val & 0x3F);
         if (addr == 0xFF16) ch2.length_counter = 64 - (val & 0x3F);
         if (addr == 0xFF1B) ch3.length_counter = 256 - val;
         if (addr == 0xFF20) ch4.length_counter = 64 - (val & 0x3F);
 
         // -- TRIGGERS --
+        // Si el bit 7 es 1 se debe disparar el canal inmediatamente
         if (addr == 0xFF14 && (val & 0x80) != 0) ch1.trigger(1);
         if (addr == 0xFF19 && (val & 0x80) != 0) ch2.trigger(2);
         if (addr == 0xFF1E && (val & 0x80) != 0) ch3.trigger();
@@ -123,6 +127,7 @@ public class APU {
 
     // -- CICLO PRINCIPAL --
     public void apu_tick() {
+        // 0xFF26 - NR52 (Sound On/Off)
         if ((regs[0x16] & 0x80) == 0) return;
 
         ch1.tick(1);
@@ -130,28 +135,40 @@ public class APU {
         ch3.tick();
         ch4.tick();
 
+        // Divisor de frecuencia (prescaler)
+        // 512 Hz - 4,194,304 / 512 = 8,192
         frame_sequencer_timer++;
         if (frame_sequencer_timer >= 8192) {
+            // Si el emulador se desfasó en timing, restar en lugar de igualar a 0 permite conservar
+            // dichos desfaces y la sincronización
             frame_sequencer_timer -= 8192;
 
-            if (frame_sequencer_step % 2 == 0) {
-                ch1.clock_length(1); ch2.clock_length(2);
-                ch3.clock_length(); ch4.clock_length();
+            // Avanza a 256 Hz
+            if ((frame_sequencer_step & 1) == 0) {
+                ch1.clock_length(1);
+                ch2.clock_length(2);
+                ch3.clock_length();
+                ch4.clock_length();
             }
+            // Envolvente de 64 Hz
             if (frame_sequencer_step == 7) {
-                ch1.clock_envelope(1); ch2.clock_envelope(2);
+                ch1.clock_envelope(1);
+                ch2.clock_envelope(2);
                 ch4.clock_envelope();
             }
+            // Sweep de 128 Hz
             if (frame_sequencer_step == 2 || frame_sequencer_step == 6) {
                 ch1.clock_sweep();
             }
 
-            frame_sequencer_step = (frame_sequencer_step + 1) % 8;
+            // Ciclo de 8 pasos
+            frame_sequencer_step = (frame_sequencer_step + 1) & 7;
         }
 
+        // Se debe sincronizar el reloj de la consola con el sample rate de 44.1 kHz
         sample_timer++;
         if (sample_timer >= TICKS_PER_SAMPLE) {
-            sample_timer -= TICKS_PER_SAMPLE;
+            sample_timer -= TICKS_PER_SAMPLE; // Garantizar que el desfase sea 0
             mix_audio();
         }
     }
@@ -176,7 +193,7 @@ public class APU {
         if ((nr51 & 0x08) != 0) right += out4;
 
         int nr50 = regs[0x14];
-        int vol_left = ((nr50 >> 4) & 0x07) + 1; // +1 para evitar multiplicar por 0 en volumen mínimo real
+        int vol_left = ((nr50 >> 4) & 0x07) + 1;
         int vol_right = (nr50 & 0x07) + 1;
 
         left = left * vol_left;
@@ -190,7 +207,10 @@ public class APU {
         audio_buffer[buffer_pos++] = (byte) scaled_right;
 
         if (buffer_pos >= audio_buffer.length) {
-            audioQueue.offer(audio_buffer.clone());
+            // Escribimos directamente en el hilo principal.
+            // Si el buffer de la tarjeta de sonido está lleno, esto pausará la ejecución
+            // del emulador automáticamente por unos milisegundos, sincronizando el juego.
+            audioLine.write(audio_buffer, 0, audio_buffer.length);
             buffer_pos = 0;
         }
     }
@@ -230,7 +250,6 @@ public class APU {
             env_timer = nrX2 & 7;
             if (env_timer == 0) env_timer = 8;
 
-            // El length_counter se inicializa solo si está en 0
             if (length_counter == 0) {
                 length_counter = 64;
             }

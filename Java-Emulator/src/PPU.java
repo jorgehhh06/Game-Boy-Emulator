@@ -23,8 +23,21 @@ public class PPU {
     public boolean get_vram_blocked(){ return vram_blocked;}
     public boolean get_oam_blocked(){ return oam_blocked;}
 
+    // -- Delay de 1 M-Cycle para LCD_Stat interrupt
+    int lcd_stat_delay = 0;
+
     // Almacén para los 10 sprites máximos permitidos por línea (DMG hardware limitation)
     public List<SpriteEntry> lineSprites = new ArrayList<>();
+
+    // Retraso de 1 M-Cycle al pedir la interrupción LCD STAT
+    public void tick_t_cycle() {
+        if (lcd_stat_delay > 0 && (lcd_stat_delay & 3) == 0) {
+            Bus.intrp.request_interrupt(Interrupts.LCD_STAT);
+        }
+        if (lcd_stat_delay > 0) {
+            lcd_stat_delay--;
+        }
+    }
 
     /*
      * Motor principal de la PPU. Se ejecuta en cada T-Cycle del sistema.
@@ -35,6 +48,8 @@ public class PPU {
      * Sincroniza los estados (Modos) basándose en el reloj de línea.
      */
     public void ppu_tick() {
+        tick_t_cycle(); // Retraso de 1 M-Cycle al pedir LCD STAT
+
         // Verificamos si el LCD está APAGADO (Bit 7 en 0)
         if ((MemoryMapped_IO.lcd.getLcdc() & 0x80) == 0) {
             // El hardware detiene la PPU y fuerza LY a 0
@@ -42,13 +57,14 @@ public class PPU {
             MemoryMapped_IO.lcd.setLy(0);
             window_line = 0;
             fetcher.reset(); // Vaciamos el pipeline de píxeles
-
+            // Evitar problemas de contención de bus
+            vram_blocked = false;
+            oam_blocked = false;
             // Forzamos el Modo 0 (H-Blank) directo en memoria.
             // Es CRÍTICO hacer esto modificando el registro directamente y NO
             // llamando a setMode(0), para evitar un bucle de interrupciones STAT.
             int currentStat = MemoryMapped_IO.lcd.getStat();
             MemoryMapped_IO.lcd.setStat(currentStat & ~0x03);
-
             return; // Detenemos la PPU. La CPU ahora tiene vía libre en la VRAM.
         }
 
@@ -115,7 +131,7 @@ public class PPU {
                 // la interrupción solo se pide UNA VEZ.
                 Bus.intrp.request_interrupt(Interrupts.VBLANK);
                 if ((MemoryMapped_IO.lcd.getStat() & 0x10) != 0) {
-                    Bus.intrp.request_interrupt(Interrupts.LCD_STAT);
+                    lcd_stat_delay += 4;
                 }
             } else {
                 // Si no es V-Blank, regresamos a OAM para la siguiente línea visible
@@ -140,7 +156,7 @@ public class PPU {
                 if (MemoryMapped_IO.lcd.getLy() == MemoryMapped_IO.lcd.getLyc()) {
                     MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() | 0x04);
                     if ((MemoryMapped_IO.lcd.getStat() & 0x40) != 0) {
-                        Bus.intrp.request_interrupt(Interrupts.LCD_STAT);
+                        lcd_stat_delay += 4;
                     }
                 } else {
                     MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() & ~0x04);
@@ -192,7 +208,8 @@ public class PPU {
         if (MemoryMapped_IO.lcd.getLy() == MemoryMapped_IO.lcd.getLyc()) {
             MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() | 0x04); // Ponemos el bit 2 en 1
             if ((MemoryMapped_IO.lcd.getStat() & 0x40) != 0) {
-                Bus.intrp.request_interrupt(Interrupts.LCD_STAT); // STAT INT por LYC
+                // STAT INT por LYC
+                lcd_stat_delay += 4;
             }
         } else {
             MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() & ~0x04); // Si LY != LYC mantenemos apagado el bit 2
@@ -215,7 +232,7 @@ public class PPU {
         if (m == 2 && (currentStat & 0x20) != 0) interruptRequested = true; // Modo 2 (OAM)
 
         if (interruptRequested) {
-            Bus.intrp.request_interrupt(Interrupts.LCD_STAT);
+            lcd_stat_delay += 4;
         }
     }
 

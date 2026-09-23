@@ -33,7 +33,7 @@ public class DMA {
             // C0 << 8 = C000
             int address = (value << 8) + current_byte;
             // Se mueve 1 byte por M-Cycle
-            Bus.ppu.oam_write(0xFE00 + current_byte, Bus.bus_read(address));
+            Bus.ppu.oam_write(0xFE00 + current_byte, Bus.raw_read(address));
             current_byte++;
             active = current_byte < 0xA0;
         }

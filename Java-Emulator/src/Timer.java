@@ -32,6 +32,7 @@ public class Timer {
         return (divider >> bitPos) & 1;
     }
 
+    // always @(posedge clk) begin
     public void timer_tick() {
         // Manejo del retraso de 4 T-Cycles (1 M-Cycle) al desbordar TIMA
         if (timaOverflowing) {

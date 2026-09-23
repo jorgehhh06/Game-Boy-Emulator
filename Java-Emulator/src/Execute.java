@@ -231,7 +231,7 @@ public class Execute {
                 a = cpu.read_reg(Instructions_Enum.RegType.RT_A) & 0xFF;
 
                 // Si la suma anterior tuvo acarreo del bit 3 al 4 (se pasó de 15)
-                // o si no estamos restando (Flag N desactivada) y el primer dífito es mayor a 9
+                // o si no estamos restando (Flag N desactivada) y el primer dígito es mayor a 9
                 // Debemos hacer un ajuste y sumar 6 para desbordar el hexadecimal a decimal
                 if (cpu.getFlagH() || (!cpu.getFlagN() && (a & 0xF) > 9)) {
                     u_daa = 6;

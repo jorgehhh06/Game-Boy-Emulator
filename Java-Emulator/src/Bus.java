@@ -40,24 +40,27 @@ public class Bus {
 
         // 0x0000 - 0x7FFF: ROM
         if (address < 0x8000) {
+            if (dma.dma_transferring()) return 0xFF;
             return currentCart.cart_read(address);
         }
         // 0x8000 - 0x9FFF: VRAM
         else if (address < 0xA000) {
-            if (ppu.get_vram_blocked()) return 0xFF;
+            if (dma.dma_transferring() ||ppu.get_vram_blocked()) return 0xFF;
             return ppu.vram_read(address);
         }
         // 0xA000 - 0xBFFF: Cartridge RAM (External)
         else if (address < 0xC000) {
+            if (dma.dma_transferring()) return 0xFF;
             return currentCart.cart_read(address);
         }
         // 0xC000 - 0xDFFF: Work RAM (WRAM)
         else if (address < 0xE000) {
+            if (dma.dma_transferring()) return 0xFF;
             return currentRam.read_wram(address);
         }
         // 0xE000 - 0xFDFF: Echo RAM (Generalmente ignorada)
         else if (address < 0xFE00) {
-            return 0;
+            return 0xFF;
         }
         // 0xFE00 - 0xFE9F: OAM (Sprites)
         else if (address < 0xFEA0) {
@@ -66,7 +69,7 @@ public class Bus {
         }
         // 0xFEA0 - 0xFEFF: Reservado / Inutilizable
         else if (address < 0xFF00) {
-            return 0;
+            return 0xFF;
         }
         // 0xFF00 - 0xFF7F: I/O Registers
         else if (address < 0xFF80) {
@@ -89,16 +92,19 @@ public class Bus {
         value &= 0xFF;
 
         if (address < 0x8000) {
+            if (dma.dma_transferring()) return;
             currentCart.cart_write(address, value);
         }
         else if (address < 0xA000) {
-            if (ppu.get_vram_blocked()) return;
+            if (dma.dma_transferring() || ppu.get_vram_blocked()) return;
             ppu.vram_write(address, value);
         }
         else if (address < 0xC000) {
+            if (dma.dma_transferring()) return;
             currentCart.cart_write(address, value);
         }
         else if (address < 0xE000) {
+            if (dma.dma_transferring()) return;
             currentRam.write_wram(address, value);
         }
         else if (address < 0xFE00) {
@@ -123,6 +129,44 @@ public class Bus {
         }
         else {
             Bus.intrp.set_ie_register(value);
+        }
+    }
+    
+    // -- Usado exclusivamente para DMA Transfer --
+    // Si se usara bus_read convencional, el DMA se bloqueó así mismo
+    public static int raw_read(int address) {
+        address &= 0xFFFF;
+
+        // 0x0000 - 0x7FFF: ROM
+        if (address < 0x8000) {
+            return currentCart.cart_read(address);
+        }
+        // 0x8000 - 0x9FFF: VRAM
+        else if (address < 0xA000) {
+            return ppu.vram_read(address);
+        }
+        // 0xA000 - 0xBFFF: Cartridge RAM (External)
+        else if (address < 0xC000) {
+            return currentCart.cart_read(address);
+        }
+        // 0xC000 - 0xDFFF: Work RAM (WRAM)
+        else if (address < 0xE000) {
+            return currentRam.read_wram(address);
+        }
+        // 0xE000 - 0xFDFF: Echo RAM (Generalmente ignorada)
+        else if (address < 0xFE00) {
+            return 0xFF;
+        }
+        // 0xFE00 - 0xFE9F: OAM (Sprites)
+        else if (address < 0xFEA0) {
+            return ppu.oam_read(address);
+        }
+        // 0xFEA0 - 0xFEFF: Reservado / Inutilizable
+        else if (address < 0xFF00) {
+            return 0xFF;
+        }
+        else {
+            return 0xFF;
         }
     }
 }
