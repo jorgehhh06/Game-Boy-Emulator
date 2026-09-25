@@ -223,7 +223,7 @@ public class Cartridge {
         return 0xFF;
     }
 
-     public void cart_write(int address, int value) {
+    public void cart_write(int address, int value) {
         // -- CONTROL DE BANKING (0x0000 - 0x3FFF) --
         if (address < 0x4000) {
             if (isMBC2) {
@@ -260,11 +260,18 @@ public class Cartridge {
                 else rom_bank_value = (rom_bank_value & 0xFF) | ((value & 1) << 8);
             }
 
-            // Aplicar Mirroring de ROM general
+            // CORRECCIÓN: El hardware real usa máscaras de bits para el mirroring, no operador módulo.
             int total_rom_banks = rom_data.length / 0x4000;
             if (total_rom_banks > 0) {
-                rom_bank_value %= total_rom_banks;
-                if (rom_bank_value == 0) rom_bank_value = 1;
+                int mask = 1;
+                while (mask < total_rom_banks) {
+                    mask = (mask << 1) | 1;
+                }
+                rom_bank_value &= mask;
+
+                // MBC5 es el único MBC que permite rutear el banco 0 a la zona de 0x4000-0x7FFF
+                if (rom_bank_value == 0 && !isMBC5) rom_bank_value = 1;
+
                 rom_bank_offset = rom_bank_value * 0x4000;
             }
         }
@@ -277,9 +284,17 @@ public class Cartridge {
                 else {
                     rom_bank_value = (rom_bank_value & 0x1F) | (val << 5);
                     int total_rom_banks = rom_data.length / 0x4000;
-                    rom_bank_value %= total_rom_banks;
-                    if (rom_bank_value == 0) rom_bank_value = 1;
-                    rom_bank_offset = rom_bank_value * 0x4000;
+                    if (total_rom_banks > 0) {
+                        int mask = 1;
+                        while (mask < total_rom_banks) {
+                            mask = (mask << 1) | 1;
+                        }
+                        rom_bank_value &= mask;
+
+                        if (rom_bank_value == 0 && !isMBC5) rom_bank_value = 1;
+
+                        rom_bank_offset = rom_bank_value * 0x4000;
+                    }
                 }
             }
             else if (isMBC3) current_sram_bank = value;

@@ -1,4 +1,6 @@
 import javax.sound.sampled.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 
 public class APU {
 
@@ -22,20 +24,25 @@ public class APU {
     private WaveChannel ch3 = new WaveChannel();
     private NoiseChannel ch4 = new NoiseChannel();
 
-    // -- RELOJES --
-    private int frame_sequencer_timer = 0; // 512 Hz, basado en el timer de la consola
+    // -- RELOJES Y SINCRONIZACIÓN --
+    private int frame_sequencer_timer = 0; // 512 Hz, basado en el timer DIV
     private int frame_sequencer_step = 0; // Estados de FSMs
 
-    // Contador de ciclos de Game Boy que han pasado desde la última vez que generé una muestra
-    private int sample_timer = 0;
-    private static final int SAMPLE_RATE = 44100; // 44,100 Hz actuales
-    private static final int TICKS_PER_SAMPLE = 4194304 / SAMPLE_RATE; // Reloj de la consola / sample rate
+    // Acumuladores de sobremuestreo (Anti-aliasing para el "ruido metálico")
+    private int left_accum = 0;
+    private int right_accum = 0;
+    private int accum_count = 0;
 
-    // -- JAVA SOUND API --
+    // Sincronización exacta usando aritmética entera (Evita el stuttering)
+    private int sample_timer = 0;
+    private static final int SAMPLE_RATE = 44100;
+    private static final int CLOCK_RATE = 4194304;
+
+    // -- JAVA SOUND API Y COLA CONCURRENTE --
     private SourceDataLine audioLine;
-    // Buffer interno más pequeño para tener menos latencia (256 frames de audio)
     private byte[] audio_buffer = new byte[512];
     private int buffer_pos = 0;
+    private BlockingQueue<byte[]> audioQueue = new ArrayBlockingQueue<>(16);
 
     public APU() {
         try {
@@ -46,27 +53,54 @@ public class APU {
             // Reducimos el buffer de la tarjeta de sonido a 2048 para que reaccione más rápido
             audioLine.open(format, 2048);
             audioLine.start();
+
+            // Hilo consumidor dedicado. Lee la cola y escribe en la tarjeta de sonido sin bloquear la CPU.
+            Thread audioThread = new Thread(() -> {
+                while (true) {
+                    try {
+                        byte[] chunk = audioQueue.take();
+                        audioLine.write(chunk, 0, chunk.length);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                }
+            });
+            audioThread.setDaemon(true); // Permite que el programa se cierre limpiamente
+            audioThread.start();
+
         } catch (Exception e) {
             System.err.println("Error al inicializar el audio");
             e.printStackTrace();
         }
     }
 
+    // -- API EXTERNA PARA LA CPU --
+
+    // IMPORTANTE: Llamar desde el bus de memoria cuando la CPU escriba en 0xFF04 (DIV)
+    public void reset_div() {
+        // En hardware, el Frame Sequencer es empujado por el flanco de bajada (falling edge) del bit 12 de DIV.
+        if (frame_sequencer_timer >= 4096) {
+            step_frame_sequencer();
+        }
+        frame_sequencer_timer = 0;
+    }
+
     // -- LECTURA Y ESCRITURA MMIO --
+
     public int apu_read(int addr) {
         // Ram del canal 3
         if (addr >= 0xFF30 && addr <= 0xFF3F) {
+            // FIX BLARGG 09: En DMG real, leer devuelve 0xFF a menos que aciertes el T-cycle exacto
+            if (ch3.enabled) {
+                if (ch3.just_accessed) return wave_ram[ch3.wave_pos / 2];
+                else return 0xFF;
+            }
             return wave_ram[addr - 0xFF30];
         }
         int offset = addr - 0xFF10;
 
         // NR52
         if (addr == 0xFF26) {
-            /*
-            Bit 7: Apagado/Encendido
-            Bit 4 a 6: Resistencias pull up
-            Bit 0 a 3: Banderas de actividad de cada canal
-            */
             int res = regs[offset] & 0x80; // Aislar el bit 7
             res |= 0x70; // Se hace pull up a los bits 4-6
             if (ch1.enabled) res |= 1; // Bit 0 = Canal 1
@@ -84,7 +118,12 @@ public class APU {
         val &= 0xFF;
         // Ram del canal 3
         if (addr >= 0xFF30 && addr <= 0xFF3F) {
-            wave_ram[addr - 0xFF30] = val;
+            // FIX BLARGG 12: En DMG real, escrituras son bloqueadas a menos que aciertes el T-cycle exacto
+            if (ch3.enabled) {
+                if (ch3.just_accessed) wave_ram[ch3.wave_pos / 2] = val;
+            } else {
+                wave_ram[addr - 0xFF30] = val;
+            }
             return;
         }
 
@@ -92,88 +131,111 @@ public class APU {
 
         // NR52
         if (addr == 0xFF26) {
+            boolean was_on = (regs[offset] & 0x80) != 0;
+            boolean is_on = (val & 0x80) != 0;
             regs[offset] = val & 0x80; // Bit de encendido
-            if ((val & 0x80) == 0) { // Si está apagado
+
+            if (was_on && !is_on) { // Si se acaba de apagar
                 // Todos los registros se ponen en 0
                 for (int i = 0; i < 0x30; i++) regs[i] = 0;
-                ch1.enabled = false; ch2.enabled = false;
-                ch3.enabled = false; ch4.enabled = false;
+                ch1.enabled = false; ch1.length_enabled = false;
+                ch2.enabled = false; ch2.length_enabled = false;
+                ch3.enabled = false; ch3.length_enabled = false;
+                ch4.enabled = false; ch4.length_enabled = false;
+            } else if (!was_on && is_on) { // Si se acaba de encender
+                frame_sequencer_step = (frame_sequencer_timer >= 4096) ? 1 : 0;
             }
             return;
         }
 
-        // Si el bit 7 de NR52 es 0, no hace nada
-        if ((regs[0x16] & 0x80) == 0) return;
+        // FIX BLARGG 11: Si el bit 7 de NR52 es 0, sí se escribe a regs[offset], pero recortando el ciclo de trabajo
+        if ((regs[0x16] & 0x80) == 0) {
+            if (addr == 0xFF11) { ch1.length_counter = 64 - (val & 0x3F); regs[offset] = val & 0x3F; }
+            if (addr == 0xFF16) { ch2.length_counter = 64 - (val & 0x3F); regs[offset] = val & 0x3F; }
+            if (addr == 0xFF1B) { ch3.length_counter = 256 - val; regs[offset] = val; }
+            if (addr == 0xFF20) { ch4.length_counter = 64 - (val & 0x3F); regs[offset] = val & 0x3F; }
+            return;
+        }
+
+        // FIX BLARGG 05: Chequeo para apagar el canal si se sale del modo resta en el Sweep.
+        if (addr == 0xFF10) {
+            boolean was_decrease = (regs[0] & 8) != 0;
+            boolean is_decrease = (val & 8) != 0;
+            if (ch1.negate_calc_done && was_decrease && !is_decrease) {
+                ch1.enabled = false;
+            }
+        }
 
         regs[offset] = val;
 
         // Los dos bits de arriba controlan cuál de los 4 ciclos de trabajo utilizar
-        // A los canales 1, 2 y 4 les dieron 6 bits (64 valores posibles) para utilizar
-        // Al canal 3 le dieron un byte entero
-        // Los contadores son up counters, si el canal debe sonar por 4 ticks se pone 60
-        // y la máquina cuenta 60 -> 61 -> 62 -> 63 -> 64 -> se apaga el canal por overflow
         if (addr == 0xFF11) ch1.length_counter = 64 - (val & 0x3F);
         if (addr == 0xFF16) ch2.length_counter = 64 - (val & 0x3F);
         if (addr == 0xFF1B) ch3.length_counter = 256 - val;
         if (addr == 0xFF20) ch4.length_counter = 64 - (val & 0x3F);
 
-        // -- TRIGGERS --
-        // Si el bit 7 es 1 se debe disparar el canal inmediatamente
-        if (addr == 0xFF14 && (val & 0x80) != 0) ch1.trigger(1);
-        if (addr == 0xFF19 && (val & 0x80) != 0) ch2.trigger(2);
-        if (addr == 0xFF1E && (val & 0x80) != 0) ch3.trigger();
-        if (addr == 0xFF23 && (val & 0x80) != 0) ch4.trigger();
+        // Deshabilitar el DAC apaga el canal de inmediato
+        if (addr == 0xFF12 && (val & 0xF8) == 0) ch1.enabled = false;
+        if (addr == 0xFF17 && (val & 0xF8) == 0) ch2.enabled = false;
+        if (addr == 0xFF1A && (val & 0x80) == 0) ch3.enabled = false;
+        if (addr == 0xFF21 && (val & 0xF8) == 0) ch4.enabled = false;
+
+        // Triggers manejados internamente en las clases para conservar los Glitches exactos
+        if (addr == 0xFF14) ch1.write_nrx4(1, val);
+        if (addr == 0xFF19) ch2.write_nrx4(2, val);
+        if (addr == 0xFF1E) ch3.write_nrx4(val);
+        if (addr == 0xFF23) ch4.write_nrx4(val);
     }
 
     // -- CICLO PRINCIPAL --
     public void apu_tick() {
-        // 0xFF26 - NR52 (Sound On/Off)
-        if ((regs[0x16] & 0x80) == 0) return;
-
-        ch1.tick(1);
-        ch2.tick(2);
-        ch3.tick();
-        ch4.tick();
-
-        // Divisor de frecuencia (prescaler)
-        // 512 Hz - 4,194,304 / 512 = 8,192
         frame_sequencer_timer++;
         if (frame_sequencer_timer >= 8192) {
-            // Si el emulador se desfasó en timing, restar en lugar de igualar a 0 permite conservar
-            // dichos desfaces y la sincronización
             frame_sequencer_timer -= 8192;
-
-            // Avanza a 256 Hz
-            if ((frame_sequencer_step & 1) == 0) {
-                ch1.clock_length(1);
-                ch2.clock_length(2);
-                ch3.clock_length();
-                ch4.clock_length();
+            if ((regs[0x16] & 0x80) != 0) {
+                step_frame_sequencer();
             }
-            // Envolvente de 64 Hz
-            if (frame_sequencer_step == 7) {
-                ch1.clock_envelope(1);
-                ch2.clock_envelope(2);
-                ch4.clock_envelope();
-            }
-            // Sweep de 128 Hz
-            if (frame_sequencer_step == 2 || frame_sequencer_step == 6) {
-                ch1.clock_sweep();
-            }
-
-            // Ciclo de 8 pasos
-            frame_sequencer_step = (frame_sequencer_step + 1) & 7;
         }
 
+        // Si la APU está encendida procesamos los canales.
+        if ((regs[0x16] & 0x80) != 0) {
+            ch1.tick(1);
+            ch2.tick(2);
+            ch3.tick();
+            ch4.tick();
+        }
+
+        // Sobremuestreo para el filtro Boxcar
+        accumulate_audio();
+
         // Se debe sincronizar el reloj de la consola con el sample rate de 44.1 kHz
-        sample_timer++;
-        if (sample_timer >= TICKS_PER_SAMPLE) {
-            sample_timer -= TICKS_PER_SAMPLE; // Garantizar que el desfase sea 0
+        sample_timer += SAMPLE_RATE;
+        if (sample_timer >= CLOCK_RATE) {
+            sample_timer -= CLOCK_RATE;
             mix_audio();
         }
     }
 
-    private void mix_audio() {
+    private void step_frame_sequencer() {
+        frame_sequencer_step = (frame_sequencer_step + 1) & 7;
+
+        if ((frame_sequencer_step & 1) == 1) { // Pasos impares
+            ch1.clock_length(1);
+            ch2.clock_length(2);
+            ch3.clock_length();
+            ch4.clock_length();
+        }
+        if ((frame_sequencer_step & 3) == 3) {
+            ch1.clock_sweep();
+        }
+        if ((frame_sequencer_step & 7) == 7) {
+            ch1.clock_envelope(1);
+            ch2.clock_envelope(2);
+            ch4.clock_envelope();
+        }
+    }
+
+    private void accumulate_audio() {
         int out1 = ch1.get_output();
         int out2 = ch2.get_output();
         int out3 = ch3.get_output();
@@ -193,13 +255,26 @@ public class APU {
         if ((nr51 & 0x08) != 0) right += out4;
 
         int nr50 = regs[0x14];
-        int vol_left = ((nr50 >> 4) & 0x07) + 1;
-        int vol_right = (nr50 & 0x07) + 1;
+        left *= (((nr50 >> 4) & 0x07) + 1);
+        right *= ((nr50 & 0x07) + 1);
 
-        left = left * vol_left;
-        right = right * vol_right;
+        left_accum += left;
+        right_accum += right;
+        accum_count++;
+    }
 
-        // Escalar volumen máximo teórico (60 * 8 = 480) al límite del byte (255) para evitar clipping
+    private void mix_audio() {
+        if (accum_count == 0) return;
+
+        // Promediar los ciclos de reloj acumulados
+        int left = left_accum / accum_count;
+        int right = right_accum / accum_count;
+
+        left_accum = 0;
+        right_accum = 0;
+        accum_count = 0;
+
+        // Escalar volumen máximo teórico (60 * 8 = 480) al límite del byte (255)
         int scaled_left = (left * 255) / 480;
         int scaled_right = (right * 255) / 480;
 
@@ -207,10 +282,9 @@ public class APU {
         audio_buffer[buffer_pos++] = (byte) scaled_right;
 
         if (buffer_pos >= audio_buffer.length) {
-            // Escribimos directamente en el hilo principal.
-            // Si el buffer de la tarjeta de sonido está lleno, esto pausará la ejecución
-            // del emulador automáticamente por unos milisegundos, sincronizando el juego.
-            audioLine.write(audio_buffer, 0, audio_buffer.length);
+            // offer() es no bloqueante. Descartará silenciosamente el frame si la tarjeta
+            // de sonido está llena, liberando a la CPU.
+            audioQueue.offer(audio_buffer.clone());
             buffer_pos = 0;
         }
     }
@@ -220,6 +294,10 @@ public class APU {
     private class SquareChannel {
         boolean has_sweep;
         boolean enabled = false;
+        boolean length_enabled = false;
+
+        boolean sweep_enabled_flag = false;
+        boolean negate_calc_done = false;
 
         int freq_timer = 0;
         int duty_step = 0;
@@ -238,27 +316,54 @@ public class APU {
 
         public SquareChannel(boolean has_sweep) { this.has_sweep = has_sweep; }
 
-        public void trigger(int ch_num) {
-            enabled = true;
+        public void write_nrx4(int ch_num, int val) {
             int offset = (ch_num == 1) ? 0 : 5;
+            boolean trigger = (val & 0x80) != 0;
+            boolean enable_length = (val & 0x40) != 0;
 
-            int freq = regs[offset+3] | ((regs[offset+4] & 7) << 8);
-            freq_timer = (2048 - freq) * 4;
-
-            int nrX2 = regs[offset+2];
-            vol = (nrX2 >> 4) & 0x0F;
-            env_timer = nrX2 & 7;
-            if (env_timer == 0) env_timer = 8;
-
-            if (length_counter == 0) {
+            if (trigger && length_counter == 0) {
                 length_counter = 64;
+                length_enabled = false;
             }
 
-            if (has_sweep) {
-                shadow_freq = freq;
-                int nr10 = regs[0];
-                sweep_timer = (nr10 >> 4) & 7;
-                if (sweep_timer == 0) sweep_timer = 8;
+            if (enable_length && !length_enabled && (frame_sequencer_step & 1) == 1 && length_counter > 0) {
+                length_counter--;
+                if (length_counter == 0) {
+                    if (trigger) length_counter = 63;
+                    else enabled = false;
+                }
+            }
+
+            length_enabled = enable_length;
+
+            if (trigger) {
+                if ((regs[offset+2] & 0xF8) != 0) enabled = true;
+
+                int freq = regs[offset+3] | ((regs[offset+4] & 7) << 8);
+                freq_timer = (2048 - freq) * 4;
+
+                vol = (regs[offset+2] >> 4) & 0x0F;
+                env_timer = regs[offset+2] & 7;
+                if (env_timer == 0) env_timer = 8;
+
+                if (has_sweep) {
+                    shadow_freq = freq;
+                    int nr10 = regs[0];
+                    int period = (nr10 >> 4) & 7;
+                    int shift = nr10 & 7;
+                    boolean decrease = (nr10 & 8) != 0;
+
+                    sweep_timer = (period == 0) ? 8 : period;
+                    sweep_enabled_flag = (period > 0 || shift > 0);
+                    negate_calc_done = false;
+
+                    if (shift > 0) {
+                        int calc_freq = shadow_freq >> shift;
+                        calc_freq = decrease ? shadow_freq - calc_freq : shadow_freq + calc_freq;
+                        if (decrease) negate_calc_done = true;
+                        if (calc_freq > 2047) enabled = false;
+                    }
+                }
             }
         }
 
@@ -274,8 +379,6 @@ public class APU {
         }
 
         public void clock_length(int ch_num) {
-            int offset = (ch_num == 1) ? 0 : 5;
-            boolean length_enabled = (regs[offset+4] & 0x40) != 0;
             if (length_enabled && length_counter > 0) {
                 length_counter--;
                 if (length_counter == 0) enabled = false;
@@ -305,21 +408,26 @@ public class APU {
             int shift = nr10 & 7;
             boolean decrease = (nr10 & 8) != 0;
 
-            if (period != 0) {
-                sweep_timer--;
-                if (sweep_timer <= 0) {
-                    sweep_timer = period;
-                    if (shift != 0) {
-                        int new_freq = shadow_freq >> shift;
-                        if (decrease) new_freq = shadow_freq - new_freq;
-                        else new_freq = shadow_freq + new_freq;
+            sweep_timer--;
+            if (sweep_timer <= 0) {
+                sweep_timer = (period == 0) ? 8 : period;
 
-                        if (new_freq > 2047) enabled = false;
-                        else {
-                            shadow_freq = new_freq;
-                            regs[3] = new_freq & 0xFF;
-                            regs[4] = (regs[4] & 0xF8) | ((new_freq >> 8) & 7);
-                        }
+                if (sweep_enabled_flag && period > 0) {
+                    int new_freq = shadow_freq >> shift;
+                    new_freq = decrease ? shadow_freq - new_freq : shadow_freq + new_freq;
+
+                    if (decrease) negate_calc_done = true;
+
+                    if (new_freq > 2047) {
+                        enabled = false;
+                    } else if (shift > 0) {
+                        shadow_freq = new_freq;
+                        regs[3] = new_freq & 0xFF;
+                        regs[4] = (regs[4] & 0xF8) | ((new_freq >> 8) & 7);
+
+                        int calc2 = shadow_freq >> shift;
+                        calc2 = decrease ? shadow_freq - calc2 : shadow_freq + calc2;
+                        if (calc2 > 2047) enabled = false;
                     }
                 }
             }
@@ -335,30 +443,67 @@ public class APU {
 
     private class WaveChannel {
         boolean enabled = false;
+        boolean length_enabled = false;
         int freq_timer = 0;
         int wave_pos = 0;
         int length_counter = 0;
 
-        public void trigger() {
-            enabled = true;
-            int freq = regs[0x0D] | ((regs[0x0E] & 7) << 8);
-            freq_timer = (2048 - freq) * 2;
-            if (length_counter == 0) length_counter = 256;
-            wave_pos = 0;
+        boolean just_accessed = false; // FIX BLARGG 09/12
+
+        public void write_nrx4(int val) {
+            boolean trigger = (val & 0x80) != 0;
+            boolean enable_length = (val & 0x40) != 0;
+
+            if (trigger && length_counter == 0) {
+                length_counter = 256;
+                length_enabled = false;
+            }
+
+            if (enable_length && !length_enabled && (frame_sequencer_step & 1) == 1 && length_counter > 0) {
+                length_counter--;
+                if (length_counter == 0) {
+                    if (trigger) length_counter = 255;
+                    else enabled = false;
+                }
+            }
+
+            length_enabled = enable_length;
+
+            if (trigger) {
+                // FIX BLARGG 10: Glitch de corrupción de memoria al disparar la Wave RAM justo cuando iba a leer
+                if (enabled && freq_timer <= 2) {
+                    int offset = ((wave_pos + 1) % 32) / 2;
+                    if (offset < 4) {
+                        wave_ram[0] = wave_ram[offset];
+                    } else {
+                        int base = offset & ~3;
+                        for (int i = 0; i < 4; i++) {
+                            wave_ram[i] = wave_ram[base + i];
+                        }
+                    }
+                }
+
+                if ((regs[0x0A] & 0x80) != 0) enabled = true;
+                int freq = regs[0x0D] | ((regs[0x0E] & 7) << 8);
+                // Retraso extra simulando el reinicio del reloj como en bsnes
+                freq_timer = (2048 - freq) * 2 + 6;
+                wave_pos = 0;
+            }
         }
 
         public void tick() {
+            just_accessed = false; // Solo dura este ciclo T
             if (!enabled) return;
             freq_timer--;
             if (freq_timer <= 0) {
                 int freq = regs[0x0D] | ((regs[0x0E] & 7) << 8);
                 freq_timer += (2048 - freq) * 2;
                 wave_pos = (wave_pos + 1) % 32;
+                just_accessed = true; // Abre la ventana a la CPU por un tick exacto
             }
         }
 
         public void clock_length() {
-            boolean length_enabled = (regs[0x0E] & 0x40) != 0;
             if (length_enabled && length_counter > 0) {
                 length_counter--;
                 if (length_counter == 0) enabled = false;
@@ -382,6 +527,7 @@ public class APU {
 
     private class NoiseChannel {
         boolean enabled = false;
+        boolean length_enabled = false;
         int lfsr = 0x7FFF;
         int timer = 0;
         int length_counter = 0;
@@ -389,16 +535,32 @@ public class APU {
         int vol = 0;
         int env_timer = 0;
 
-        public void trigger() {
-            enabled = true;
-            lfsr = 0x7FFF;
+        public void write_nrx4(int val) {
+            boolean trigger = (val & 0x80) != 0;
+            boolean enable_length = (val & 0x40) != 0;
 
-            int nr42 = regs[0x11];
-            vol = (nr42 >> 4) & 0x0F;
-            env_timer = nr42 & 7;
-            if (env_timer == 0) env_timer = 8;
+            if (trigger && length_counter == 0) {
+                length_counter = 64;
+                length_enabled = false;
+            }
 
-            if (length_counter == 0) length_counter = 64;
+            if (enable_length && !length_enabled && (frame_sequencer_step & 1) == 1 && length_counter > 0) {
+                length_counter--;
+                if (length_counter == 0) {
+                    if (trigger) length_counter = 63;
+                    else enabled = false;
+                }
+            }
+
+            length_enabled = enable_length;
+
+            if (trigger) {
+                if ((regs[0x11] & 0xF8) != 0) enabled = true;
+                lfsr = 0x7FFF;
+                vol = (regs[0x11] >> 4) & 0x0F;
+                env_timer = regs[0x11] & 7;
+                if (env_timer == 0) env_timer = 8;
+            }
         }
 
         public void tick() {
@@ -420,7 +582,6 @@ public class APU {
         }
 
         public void clock_length() {
-            boolean length_enabled = (regs[0x13] & 0x40) != 0;
             if (length_enabled && length_counter > 0) {
                 length_counter--;
                 if (length_counter == 0) enabled = false;

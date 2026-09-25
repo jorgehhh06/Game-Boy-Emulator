@@ -133,7 +133,8 @@ public class Bus {
     }
     
     // -- Usado exclusivamente para DMA Transfer --
-    // Si se usara bus_read convencional, el DMA se bloqueó así mismo
+    // Si se usara bus_read convencional, el DMA se bloquearía así mismo
+    // Soluciona un problema de contención de Bus entre el DMA y el CPU
     public static int raw_read(int address) {
         address &= 0xFFFF;
 
