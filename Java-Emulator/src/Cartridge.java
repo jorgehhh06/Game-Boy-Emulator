@@ -37,6 +37,10 @@ public class Cartridge {
     private int rom_bank_offset = 0x4000;
     private int banking_mode = 0; // Solo usado por MBC1
 
+    // -- Variables para el Reloj de Tiempo Real (RTC) del MBC3 --
+    private boolean rtc_latch_prep = false;
+    private long latched_time = 0;
+
     // -- Static RAM (SRAM) --
     private int [][] sram_banks;
     private int current_sram_bank = 0;
@@ -190,6 +194,12 @@ public class Cartridge {
     public int cart_read(int address) {
         // ROM Banco 0
         if (address < 0x4000) {
+            // FIX MBC1: En modo 1 (Avanzado), el bloque inferior se desplaza según los bits altos.
+            if (isMBC1 && banking_mode == 1) {
+                int bank0 = (rom_bank_value & 0x60);
+                int target = (bank0 * 0x4000) + address;
+                return (target < rom_data.length) ? rom_data[target] & 0xFF : 0xFF;
+            }
             return rom_data[address] & 0xFF;
         }
         // ROM Banco Variable
@@ -208,16 +218,23 @@ public class Cartridge {
                 return (sram_banks[0][address & 0x1FF] & 0x0F) | 0xF0;
             }
 
-            // CASO MBC1, 3, 5
-            if (sram_banks != null && sram_banks.length > 0) {
+            // CASO MBC1, 3, 5 (Memoria RAM estándar)
+            if (sram_banks != null && sram_banks.length > 0 && current_sram_bank < 0x08) {
                 int target_bank = current_sram_bank % sram_banks.length;
                 if (isMBC1 && banking_mode == 0) target_bank = 0;
                 return sram_banks[target_bank][address - 0xA000] & 0xFF;
             }
 
-            // Simulación RTC para MBC3
+            // FIX MBC3: Simulación RTC utilizando el valor "Latched" para no desfasar el reloj en lecturas lentas
             if (isMBC3 && current_sram_bank >= 0x08 && current_sram_bank <= 0x0C) {
-                return (int)(System.currentTimeMillis() / 1000) & 0xFF;
+                long t = latched_time;
+                switch (current_sram_bank) {
+                    case 0x08: return (int)(t % 60) & 0xFF; // Segundos
+                    case 0x09: return (int)((t / 60) % 60) & 0xFF; // Minutos
+                    case 0x0A: return (int)((t / 3600) % 24) & 0xFF; // Horas
+                    case 0x0B: return (int)((t / 86400) % 256) & 0xFF; // Días (Byte bajo)
+                    case 0x0C: return (int)((t / 86400) / 256) & 0xFF; // Días (Byte alto) + Flags
+                }
             }
         }
         return 0xFF;
@@ -234,7 +251,7 @@ public class Cartridge {
                 // Si el bit 8 de la dirección es 1: Cambio de Banco ROM
                 else {
                     rom_bank_value = value & 0x0F;
-                    if (rom_bank_value == 0) rom_bank_value = 1;
+                    update_rom_bank();
                 }
             }
             else if (isMBC1) {
@@ -243,36 +260,28 @@ public class Cartridge {
                 } else {
                     int bank = value & 0x1F;
                     if (bank == 0) bank = 1;
-                    rom_bank_value = (rom_bank_value & 0xE0) | bank;
+                    rom_bank_value = (rom_bank_value & 0x60) | bank;
+                    update_rom_bank();
                 }
             }
             else if (isMBC3) {
                 if (address < 0x2000) sram_enabled = ((value & 0x0F) == 0x0A);
                 else {
-                    int bank = value & 0x7F;
-                    if (bank == 0) bank = 1;
-                    rom_bank_value = bank;
+                    rom_bank_value = value & 0x7F;
+                    if (rom_bank_value == 0) rom_bank_value = 1;
+                    update_rom_bank();
                 }
             }
             else if (isMBC5) {
                 if (address < 0x2000) sram_enabled = ((value & 0x0F) == 0x0A);
-                else if (address < 0x3000) rom_bank_value = (rom_bank_value & 0x100) | (value & 0xFF);
-                else rom_bank_value = (rom_bank_value & 0xFF) | ((value & 1) << 8);
-            }
-
-            // CORRECCIÓN: El hardware real usa máscaras de bits para el mirroring, no operador módulo.
-            int total_rom_banks = rom_data.length / 0x4000;
-            if (total_rom_banks > 0) {
-                int mask = 1;
-                while (mask < total_rom_banks) {
-                    mask = (mask << 1) | 1;
+                else if (address < 0x3000) {
+                    rom_bank_value = (rom_bank_value & 0x100) | (value & 0xFF);
+                    update_rom_bank();
                 }
-                rom_bank_value &= mask;
-
-                // MBC5 es el único MBC que permite rutear el banco 0 a la zona de 0x4000-0x7FFF
-                if (rom_bank_value == 0 && !isMBC5) rom_bank_value = 1;
-
-                rom_bank_offset = rom_bank_value * 0x4000;
+                else {
+                    rom_bank_value = (rom_bank_value & 0xFF) | ((value & 1) << 8);
+                    update_rom_bank();
+                }
             }
         }
 
@@ -280,22 +289,9 @@ public class Cartridge {
         else if (address < 0x6000) {
             if (isMBC1) {
                 int val = value & 0x03;
-                if (banking_mode == 1) current_sram_bank = val;
-                else {
-                    rom_bank_value = (rom_bank_value & 0x1F) | (val << 5);
-                    int total_rom_banks = rom_data.length / 0x4000;
-                    if (total_rom_banks > 0) {
-                        int mask = 1;
-                        while (mask < total_rom_banks) {
-                            mask = (mask << 1) | 1;
-                        }
-                        rom_bank_value &= mask;
-
-                        if (rom_bank_value == 0 && !isMBC5) rom_bank_value = 1;
-
-                        rom_bank_offset = rom_bank_value * 0x4000;
-                    }
-                }
+                current_sram_bank = val;
+                rom_bank_value = (rom_bank_value & 0x1F) | (val << 5);
+                update_rom_bank();
             }
             else if (isMBC3) current_sram_bank = value;
             else if (isMBC5) current_sram_bank = value & 0x0F;
@@ -303,21 +299,54 @@ public class Cartridge {
 
         // -- CAMBIO DE MODO / LATCH RTC (0x6000 - 0x7FFF) --
         else if (address < 0x8000) {
-            if (isMBC1) banking_mode = value & 0x01;
+            if (isMBC1) {
+                banking_mode = value & 0x01;
+            }
+            // FIX MBC3: Máquina de estados para capturar el tiempo exacto (Latch)
+            else if (isMBC3) {
+                if (value == 0x00) {
+                    rtc_latch_prep = true;
+                } else if (value == 0x01) {
+                    if (rtc_latch_prep) {
+                        latched_time = System.currentTimeMillis() / 1000;
+                    }
+                    rtc_latch_prep = false;
+                } else {
+                    rtc_latch_prep = false;
+                }
+            }
         }
 
         // -- ESCRITURA EN SRAM (0xA000 - 0xBFFF) --
         else if (address < 0xC000) {
             if (sram_enabled && sram_banks != null) {
                 if (isMBC2) {
-                    sram_banks[0][address & 0x1FF] = value & 0x0F;
-                } else if (sram_banks.length > 0) {
+                    // FIX MBC2: Guardamos forzando los bits altos a 1 para integridad de datos físicos
+                    sram_banks[0][address & 0x1FF] = (value & 0x0F) | 0xF0;
+                } else if (sram_banks.length > 0 && current_sram_bank < 0x08) {
                     int target_bank = current_sram_bank % sram_banks.length;
                     if (isMBC1 && banking_mode == 0) target_bank = 0;
                     sram_banks[target_bank][address - 0xA000] = value & 0xFF;
                 }
                 needs_save = true;
             }
+        }
+    }
+
+    // Función auxiliar para centralizar la máscara de bits y evitar el bug de Multicarts
+    private void update_rom_bank() {
+        int total_rom_banks = rom_data.length / 0x4000;
+        if (total_rom_banks > 0) {
+            int mask = 1;
+            while (mask < total_rom_banks) {
+                mask = (mask << 1) | 1;
+            }
+            int effective_bank = rom_bank_value & mask;
+
+            // MBC5 es el único MBC que permite rutear el banco 0 a la zona de 0x4000-0x7FFF
+            if (effective_bank == 0 && !isMBC5) effective_bank = 1;
+
+            rom_bank_offset = effective_bank * 0x4000;
         }
     }
 
