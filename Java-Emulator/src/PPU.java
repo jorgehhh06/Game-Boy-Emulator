@@ -122,7 +122,6 @@ public class PPU {
         if (line_ticks >= 456) {
             line_ticks = 0; // Reiniciamos ticks primero
             step_ly();      // Esto incrementa LY
-
             // una vez cada 456 ticks (cuando cambia la línea)
             if (MemoryMapped_IO.lcd.getLy() >= 144) {
                 setMode(1); // Entramos a V-Blank
