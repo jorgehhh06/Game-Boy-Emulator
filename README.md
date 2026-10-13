@@ -6,3 +6,5 @@ Audio is excluded for now.
 It was created using IntelliJ and is recommended for modifying the code and building the project.
 
 The emulator passes several Blargg tests and DMG ACID 2.
+
+![cpu_instrs](https://raw.githubusercontent.com/jorgehhh06/Game-Boy-Emulator/refs/heads/main/Images/cpu_instrs.jpeg)
