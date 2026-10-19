@@ -420,12 +420,14 @@ public class CPU {
 
     // -- OPERACIONES DE LA PILA --
     public void stack_push(int data){
-        Bus.bus_write(--CPUctx.regs.sp, data & 0xFF);
+        CPUctx.regs.sp = (CPUctx.regs.sp - 1) & 0xFFFF;
+        Bus.bus_write(CPUctx.regs.sp, data & 0xFF);
         cycle(4);
     }
 
     public int stack_pop(){
-        int data = Bus.bus_read(CPUctx.regs.sp++) & 0xFF;
+        int data = Bus.bus_read(CPUctx.regs.sp) & 0xFF;
+        CPUctx.regs.sp = (CPUctx.regs.sp + 1) & 0xFFFF;
         cycle(4);
         return data & 0xFF;
     }

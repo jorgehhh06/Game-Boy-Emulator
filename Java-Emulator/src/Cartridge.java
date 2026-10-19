@@ -194,9 +194,12 @@ public class Cartridge {
     public int cart_read(int address) {
         // ROM Banco 0
         if (address < 0x4000) {
-            // FIX MBC1: En modo 1 (Avanzado), el bloque inferior se desplaza según los bits altos.
+            // En modo 1 (Avanzado), el bloque inferior se desplaza según los bits altos,
+            // pero SIEMPRE enmascarado a la cantidad real de bancos de la ROM (en 512KB es 0x1F, por lo que queda en 0).
             if (isMBC1 && banking_mode == 1) {
-                int bank0 = (rom_bank_value & 0x60);
+                int total_rom_banks = rom_data.length / 0x4000;
+                int mask = (total_rom_banks > 0) ? (total_rom_banks - 1) : 0;
+                int bank0 = (rom_bank_value & 0x60) & mask;
                 int target = (bank0 * 0x4000) + address;
                 return (target < rom_data.length) ? rom_data[target] & 0xFF : 0xFF;
             }
@@ -337,14 +340,16 @@ public class Cartridge {
     private void update_rom_bank() {
         int total_rom_banks = rom_data.length / 0x4000;
         if (total_rom_banks > 0) {
-            int mask = 1;
-            while (mask < total_rom_banks) {
-                mask = (mask << 1) | 1;
+            // En MBC1, el ajuste de 0 -> 1 ocurre sobre los 5 bits bajos ANTES de enmascarar con el tamaño de la ROM
+            int bank = rom_bank_value;
+            if (!isMBC5 && (bank & 0x1F) == 0) {
+                bank |= 1;
             }
-            int effective_bank = rom_bank_value & mask;
 
-            // MBC5 es el único MBC que permite rutear el banco 0 a la zona de 0x4000-0x7FFF
-            if (effective_bank == 0 && !isMBC5) effective_bank = 1;
+            // total_rom_banks siempre es potencia de 2 (2, 4, 8, 16, 32, 64, 128...)
+            // Para 32 bancos (512 KB), la máscara correcta es 31 (0x1F), NO 63 (0x3F)
+            int mask = total_rom_banks - 1;
+            int effective_bank = bank & mask;
 
             rom_bank_offset = effective_bank * 0x4000;
         }

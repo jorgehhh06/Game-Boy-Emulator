@@ -8,31 +8,28 @@ public class Gamepad {
     private boolean buttonSelected = false;
     private boolean dpadSelected = false;
 
-    // Los botones funcionan invertidos, 1 significa no presionado, 0 significa presionado
+    // Los botones funcionan invertidos: 1 significa no presionado, 0 significa presionado
     private int dpadState = 0x0F;
     private int buttonState = 0x0F;
 
     // Latch para detectar el "Flanco de bajada" (Falling Edge)
     private int previousState = 0x0F;
 
-    public void write(int value) {
+    public synchronized void write(int value) {
         // En el hardware, 0 significa "Seleccionado"
-        // Presionar los botones cambia el valor del registro en memoria
         buttonSelected = (value & 0x20) == 0;
         dpadSelected = (value & 0x10) == 0;
 
         // La CPU acaba de cambiar el multiplexor.
-        // Si hay un botón presionado, esto podría detonar una interrupción.
+        // Si hay un botón presionado en la nueva fila seleccionada, puede detonar interrupción.
         checkInterrupt();
     }
 
-    public int read() {
+    public synchronized int read() {
         // En el GB real, los bits 6 y 7 siempre devuelven 1
-        // state es el registro en memoria
         int state = 0xCF;
 
         // Reflejamos qué fila está seleccionada en los bits 4 y 5
-        // Los bits 0-3 son para los botones, los bits 4 y 5 controlan si se lee botones o dpad
         if (!buttonSelected) state |= 0x20;
         if (!dpadSelected)   state |= 0x10;
 
@@ -43,36 +40,35 @@ public class Gamepad {
         return state;
     }
 
-    public void press(Button btn) {
+    public synchronized void press(Button btn) {
         switch (btn) {
-            case RIGHT: dpadState &= ~1; break;
-            case LEFT:  dpadState &= ~2; break;
-            case UP:    dpadState &= ~4; break;
-            case DOWN:  dpadState &= ~8; break;
+            case RIGHT:  dpadState &= ~1; break;
+            case LEFT:   dpadState &= ~2; break;
+            case UP:     dpadState &= ~4; break;
+            case DOWN:   dpadState &= ~8; break;
 
-            case A:     buttonState &= ~1; break;
-            case B:     buttonState &= ~2; break;
-            case SELECT:buttonState &= ~4; break;
-            case START: buttonState &= ~8; break;
+            case A:      buttonState &= ~1; break;
+            case B:      buttonState &= ~2; break;
+            case SELECT: buttonState &= ~4; break;
+            case START:  buttonState &= ~8; break;
         }
         // El jugador apretó un botón, revisamos si genera interrupción
         checkInterrupt();
     }
 
-    public void release(Button btn) {
+    public synchronized void release(Button btn) {
         switch (btn) {
-            case RIGHT: dpadState |= 1; break;
-            case LEFT:  dpadState |= 2; break;
-            case UP:    dpadState |= 4; break;
-            case DOWN:  dpadState |= 8; break;
+            case RIGHT:  dpadState |= 1; break;
+            case LEFT:   dpadState |= 2; break;
+            case UP:     dpadState |= 4; break;
+            case DOWN:   dpadState |= 8; break;
 
-            case A:     buttonState |= 1; break;
-            case B:     buttonState |= 2; break;
-            case SELECT:buttonState |= 4; break;
-            case START: buttonState |= 8; break;
+            case A:      buttonState |= 1; break;
+            case B:      buttonState |= 2; break;
+            case SELECT: buttonState |= 4; break;
+            case START:  buttonState |= 8; break;
         }
-        // Al soltar también validamos el estado (aunque no genera interrupción directamente,
-        // actualiza el previousState para la próxima vez).
+        // Al soltar también actualizamos previousState para el próximo flanco de bajada
         checkInterrupt();
     }
 
@@ -80,9 +76,8 @@ public class Gamepad {
         // Evaluamos solo los 4 bits bajos de salida de la matriz
         int currentState = read() & 0x0F;
 
-        // LÓGICA DE SILICIO (Falling Edge Detection):
-        // Si previousState tenía un 1, y currentState tiene un 0 en la misma posición,
-        // la operación (previousState & ~currentState) dará un resultado diferente de 0.
+        // Falling Edge Detection:
+        // Si previousState tenía un 1 y currentState tiene un 0 en la misma posición
         if ((previousState & ~currentState) != 0) {
             Bus.intrp.request_interrupt(Interrupts.JOYPAD);
         }
