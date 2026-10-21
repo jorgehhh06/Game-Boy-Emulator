@@ -106,11 +106,22 @@ public class LCD {
             // Al valor nuevo se le borran los 3 bits inferiores que marcan el estado de la máquina
             // y con el operador OR se combina con el estado viejo de la máquina
             regs[0x01] = (val & mask) | (currentStat & 0x07);
+            Bus.ppu.update_stat_irq(); // Re-evaluar las compuertas AND/OR con los nuevos bits
             return;
         }
 
         if (offset >= 0 && offset < regs.length) {
             regs[offset] = val & 0xFF;
+        }
+
+        if (offset == 0x05) { // Registro LYC (0xFF45)
+            // Si el juego cambia LYC en vivo, actualizamos el bit 2 y la compuerta OR
+            if (getLy() == getLyc()) {
+                regs[0x01] |= 0x04;
+            } else {
+                regs[0x01] &= ~0x04;
+            }
+            Bus.ppu.update_stat_irq();
         }
 
         if (addr == 0xFF46) Bus.dma.dma_init(val);

@@ -51,8 +51,9 @@ public class CB_Execute {
         // Si el modo es AM_MR, significa que operamos sobre (HL)
         if (instr.mode == Instructions_Enum.AddrMode.AM_MR) {
             int addr = cpu.read_reg(Instructions_Enum.RegType.RT_HL);
+            cpu.cycle(3);
             Bus.bus_write(addr, res);
-            cpu.cycle(4); // Ciclo extra por escribir a memoria
+            cpu.cycle(1); // Ciclo extra por escribir a memoria
         } else {
             // De lo contrario, escribimos al registro destino (reg_1)
             cpu.write_reg(instr.reg_1, res);

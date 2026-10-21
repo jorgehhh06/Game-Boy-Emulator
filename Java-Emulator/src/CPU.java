@@ -154,17 +154,20 @@ public class CPU {
             // HALT BUG: Leemos el byte pero NO incrementamos el PC.
             // Esto causa que la siguiente instrucción repita el opcode
             // o lea un operando como opcode.
+            cycle(3);
             opcode = Bus.bus_read(CPUctx.regs.pc) & 0xFF;
             CPUctx.halt_bug = false;
         } else {
+            cycle(3);
             opcode = Bus.bus_read(CPUctx.regs.pc++) & 0xFF;
         }
-        cycle(4);
+        cycle(1);
 
         // DECODE Y EXECUTE
         if (opcode == 0xCB) {
+            cycle(3);
             int cbOpcode = Bus.bus_read(CPUctx.regs.pc++) & 0xFF;
-            cycle(4);
+            cycle(1);
             CPUctx.curOpcode = cbOpcode;
             CPUctx.curInst = CB_InstructionTable.get_cb_instruction_by_opcode(cbOpcode);
             fetch_data();
@@ -208,18 +211,21 @@ public class CPU {
                 return;
 
             case AM_R_D8: // Dato de 8 bits a registro
-            case AM_D8: // Dato de 8 bits
+            case AM_D8: // Dato de 8
+                cycle(3);
                 CPUctx.fetchData = Bus.bus_read(CPUctx.regs.pc) & 0xFF;
-                cycle(4);
+                cycle(1);
                 CPUctx.regs.pc = (CPUctx.regs.pc + 1) & 0xFFFF;
                 return;
 
             case AM_R_D16: // Dato de 16 bits a registro
             case AM_D16: { // Dato de 16 bits
+                cycle(3);
                 int lo = Bus.bus_read(CPUctx.regs.pc) & 0xFF;
-                cycle(4);
+                cycle(1);
+                cycle(3);
                 int hi = Bus.bus_read((CPUctx.regs.pc + 1) & 0xFFFF) & 0xFF;
-                cycle(4);
+                cycle(1);
 
                 CPUctx.fetchData = lo | (hi << 8);
                 CPUctx.regs.pc = (CPUctx.regs.pc + 2) & 0xFFFF;
@@ -243,20 +249,23 @@ public class CPU {
                     addr |= 0xFF00;
                 }
 
+                cycle(3);
                 CPUctx.fetchData = Bus.bus_read(addr) & 0xFF;
-                cycle(4);
+                cycle(1);
                 return;
             }
 
             case AM_R_HLI: // Registro HL a registro
+                cycle(3);
                 CPUctx.fetchData = Bus.bus_read(read_reg(Instructions_Enum.RegType.RT_HL)) & 0xFF;
-                cycle(4);
+                cycle(1);
                 write_reg(Instructions_Enum.RegType.RT_HL, (read_reg(Instructions_Enum.RegType.RT_HL) + 1) & 0xFFFF);
                 return;
 
             case AM_R_HLD: // Registro HL decrement a registro
+                cycle(3);
                 CPUctx.fetchData = Bus.bus_read(read_reg(Instructions_Enum.RegType.RT_HL)) & 0xFF;
-                cycle(4);
+                cycle(1);
                 write_reg(Instructions_Enum.RegType.RT_HL, (read_reg(Instructions_Enum.RegType.RT_HL) - 1) & 0xFFFF);
                 return;
 
@@ -276,17 +285,20 @@ public class CPU {
                 return;
 
             case AM_R_A8: // Dirección de memoria de 8 bits a registro (optimizado para high page)
+                cycle(3);
                 int offsetA8 = Bus.bus_read(CPUctx.regs.pc) & 0xFF;
-                cycle(4);
+                cycle(1);
                 CPUctx.regs.pc = (CPUctx.regs.pc + 1) & 0xFFFF;
+                cycle(3);
                 CPUctx.fetchData = Bus.bus_read(0xFF00 | offsetA8) & 0xFF;
-                cycle(4);
+                cycle(1);
                 return;
 
             case AM_A8_R: // Registro a dirección de memoria de 8 bits (optimizado para high page)
+                cycle(3);
                 CPUctx.memDest = (Bus.bus_read(CPUctx.regs.pc) & 0xFF) | 0xFF00;
+                cycle(1);
                 CPUctx.destIsMem = true;
-                cycle(4);
                 CPUctx.regs.pc = (CPUctx.regs.pc + 1) & 0xFFFF;
                 CPUctx.fetchData = read_reg(CPUctx.curInst.reg_2);
                 return;
@@ -295,17 +307,20 @@ public class CPU {
                 // Este modo de direccionamiento solo se usa en LD HL,SP+i8 - 0xF8
                 // i8 es un número inmediato de 8 bits
                 // Al usar registros de la CPU solo es necesario obtener el offset i8
+                cycle(3);
                 CPUctx.fetchData = Bus.bus_read(CPUctx.regs.pc) & 0xFF;
-                cycle(4);
+                cycle(1);
                 CPUctx.regs.pc = (CPUctx.regs.pc + 1) & 0xFFFF;
                 return;
 
             case AM_A16_R: { // Registro a dirección de memoria de 16 bits
                 // La dirección de memoria objetivo está en los siguientes 2 bytes
+                cycle(3);
                 int lo = Bus.bus_read(CPUctx.regs.pc) & 0xFF;
-                cycle(4);
+                cycle(1);
+                cycle(3);
                 int hi = Bus.bus_read((CPUctx.regs.pc + 1) & 0xFFFF) & 0xFF;
-                cycle(4);
+                cycle(1);
 
                 CPUctx.memDest = lo | (hi << 8);
                 CPUctx.destIsMem = true;
@@ -315,8 +330,9 @@ public class CPU {
             }
 
             case AM_MR_D8: // Dato de 8 bits a memoria
+                cycle(3);
                 CPUctx.fetchData = Bus.bus_read(CPUctx.regs.pc) & 0xFF;
-                cycle(4);
+                cycle(1);
                 CPUctx.regs.pc = (CPUctx.regs.pc + 1) & 0xFFFF;
                 CPUctx.memDest = read_reg(CPUctx.curInst.reg_1);
                 CPUctx.destIsMem = true;
@@ -327,19 +343,23 @@ public class CPU {
                 // Eso explica la siguiente línea
                 CPUctx.memDest = read_reg(CPUctx.curInst.reg_1);
                 CPUctx.destIsMem = true;
+                cycle(3);
                 CPUctx.fetchData = Bus.bus_read(CPUctx.memDest) & 0xFF;
-                cycle(4);
+                cycle(1);
                 return;
 
             case AM_R_A16: { // Dirección de memoria de 16 bits a registro
+                cycle(3);
                 int lo = Bus.bus_read(CPUctx.regs.pc) & 0xFF;
-                cycle(4);
+                cycle(1);
+                cycle(3);
                 int hi = Bus.bus_read((CPUctx.regs.pc + 1) & 0xFFFF) & 0xFF;
-                cycle(4);
+                cycle(1);
                 int addr = lo | (hi << 8);
                 CPUctx.regs.pc = (CPUctx.regs.pc + 2) & 0xFFFF;
+                cycle(3);
                 CPUctx.fetchData = Bus.bus_read(addr) & 0xFF;
-                cycle(4);
+                cycle(1);
                 return;
             }
 
@@ -421,14 +441,16 @@ public class CPU {
     // -- OPERACIONES DE LA PILA --
     public void stack_push(int data){
         CPUctx.regs.sp = (CPUctx.regs.sp - 1) & 0xFFFF;
+        cycle(3);
         Bus.bus_write(CPUctx.regs.sp, data & 0xFF);
-        cycle(4);
+        cycle(1);
     }
 
     public int stack_pop(){
         int data = Bus.bus_read(CPUctx.regs.sp) & 0xFF;
+        cycle(3);
         CPUctx.regs.sp = (CPUctx.regs.sp + 1) & 0xFFFF;
-        cycle(4);
+        cycle(1);
         return data & 0xFF;
     }
 
@@ -470,7 +492,8 @@ public class CPU {
             Bus.ppu.ppu_tick(); // La PPU es muy sensible al timing
             Bus.timer.timer_tick(); // Disparar interrupciones es importante
             Bus.dma.dma_tick(); // Primero se actualiza la PPU y luego el DMA puede actuar
-            Bus.apu.apu_tick();
+            Bus.apu.apu_tick(); // Audio
+            // Toda esta función alimenta los flancos de subida del reloj a los demás componentes
         }
     }
 }

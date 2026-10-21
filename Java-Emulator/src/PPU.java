@@ -20,35 +20,71 @@ public class PPU {
     // Contención de bus
     private boolean vram_blocked;
     private boolean oam_blocked;
-    public boolean get_vram_blocked(){ return vram_blocked;}
-    public boolean get_oam_blocked(){ return oam_blocked;}
+    public boolean get_vram_blocked() { return vram_blocked; }
+    public boolean get_oam_blocked() { return oam_blocked; }
 
-    // -- Delay de 1 M-Cycle para LCD_Stat interrupt
-    int lcd_stat_delay = 0;
+    // Cable interno oculto de la compuerta OR (Guarda el estado anterior para detectar el flanco 0 -> 1)
+    private boolean stat_irq_line = false;
+
+    // -- Delay de 1 M-Cycle (4 T-Cycles) para LCD_STAT interrupt --
+    private int lcd_stat_delay = 0;
 
     // Almacén para los 10 sprites máximos permitidos por línea (DMG hardware limitation)
     public List<SpriteEntry> lineSprites = new ArrayList<>();
 
-    // Retraso de 1 M-Cycle al pedir la interrupción LCD STAT
+    /*
+     * Retraso exacto de 1 M-Cycle (4 T-Cycles) al pedir la interrupción LCD STAT.
+     * Se decrementa en cada T-Cycle y dispara únicamente al llegar a 0.
+     */
     public void tick_t_cycle() {
-        if (lcd_stat_delay > 0 && (lcd_stat_delay & 3) == 0) {
-            Bus.intrp.request_interrupt(Interrupts.LCD_STAT);
-        }
         if (lcd_stat_delay > 0) {
             lcd_stat_delay--;
+            if (lcd_stat_delay == 0) {
+                Bus.intrp.request_interrupt(Interrupts.LCD_STAT);
+            }
         }
+    }
+
+    /*
+     * Circuito combinacional interno de STAT: 4 compuertas AND conectadas a 1 compuerta OR.
+     * Solo agenda el delay de 1 M-Cycle cuando la línea pasa de 0 (false) a 1 (true).
+     */
+    public void update_stat_irq() {
+        // Si el LCD está apagado, la línea interna cae a 0
+        if ((MemoryMapped_IO.lcd.getLcdc() & 0x80) == 0) {
+            stat_irq_line = false;
+            return;
+        }
+
+        int stat = MemoryMapped_IO.lcd.getStat();
+        int mode = stat & 0x03;
+
+        // Las 4 compuertas AND del hardware:
+        boolean andLyc   = ((stat & 0x04) != 0) && ((stat & 0x40) != 0); // (LYC == LY) AND Bit 6
+        boolean andMode0 = (mode == 0)          && ((stat & 0x08) != 0); // (Mode 0)    AND Bit 3
+        boolean andMode1 = (mode == 1)          && ((stat & 0x10) != 0); // (Mode 1)    AND Bit 4
+        boolean andMode2 = (mode == 2)          && ((stat & 0x20) != 0); // (Mode 2)    AND Bit 5
+
+        // La compuerta OR interna que une los 4 cables en uno solo:
+        boolean currentLine = andLyc || andMode0 || andMode1 || andMode2;
+
+        // Detector de flanco de subida (0 -> 1):
+        // Si antes era 0 y ahora es 1, iniciamos el delay de 4 T-Cycles (1 M-Cycle).
+        // Si ya estaba en 1 (1 OR 1), se produce el STAT Blocking y no hace nada.
+        if (!stat_irq_line && currentLine) {
+            lcd_stat_delay = 4;
+        }
+
+        // Actualizamos el estado del cable para el siguiente ciclo
+        stat_irq_line = currentLine;
     }
 
     /*
      * Motor principal de la PPU. Se ejecuta en cada T-Cycle del sistema.
      * Sincroniza los estados (Modos) basándose en el reloj de línea.
      */
-    /*
-     * Motor principal de la PPU. Se ejecuta en cada T-Cycle del sistema.
-     * Sincroniza los estados (Modos) basándose en el reloj de línea.
-     */
     public void ppu_tick() {
-        tick_t_cycle(); // Retraso de 1 M-Cycle al pedir LCD STAT
+        tick_t_cycle(); // Procesa el conteo regresivo de 1 M-Cycle para LCD STAT
 
         // Verificamos si el LCD está APAGADO (Bit 7 en 0)
         if ((MemoryMapped_IO.lcd.getLcdc() & 0x80) == 0) {
@@ -57,12 +93,14 @@ public class PPU {
             MemoryMapped_IO.lcd.setLy(0);
             window_line = 0;
             fetcher.reset(); // Vaciamos el pipeline de píxeles
-            // Evitar problemas de contención de bus
+
+            // Evitar problemas de contención de bus y limpiar línea STAT
             vram_blocked = false;
             oam_blocked = false;
-            // Forzamos el Modo 0 (H-Blank) directo en memoria.
-            // Es CRÍTICO hacer esto modificando el registro directamente y NO
-            // llamando a setMode(0), para evitar un bucle de interrupciones STAT.
+            stat_irq_line = false;
+            lcd_stat_delay = 0;
+
+            // Forzamos el Modo 0 directo en memoria
             int currentStat = MemoryMapped_IO.lcd.getStat();
             MemoryMapped_IO.lcd.setStat(currentStat & ~0x03);
             return; // Detenemos la PPU. La CPU ahora tiene vía libre en la VRAM.
@@ -75,8 +113,8 @@ public class PPU {
         int mode = getMode();
 
         switch (mode) {
-            case 2 -> ppu_mode_oam(); // OAM Search
-            case 3 -> ppu_mode_xfer(); // Pixel Transfer
+            case 2 -> ppu_mode_oam();    // OAM Search
+            case 3 -> ppu_mode_xfer();   // Pixel Transfer
             case 0 -> ppu_mode_hblank(); // H-Blank
             case 1 -> ppu_mode_vblank(); // V-Blank
         }
@@ -121,17 +159,11 @@ public class PPU {
         vram_blocked = false;
         if (line_ticks >= 456) {
             line_ticks = 0; // Reiniciamos ticks primero
-            step_ly();      // Esto incrementa LY
-            // una vez cada 456 ticks (cuando cambia la línea)
-            if (MemoryMapped_IO.lcd.getLy() >= 144) {
-                setMode(1); // Entramos a V-Blank
+            step_ly();      // Incrementa LY y evalúa LY == LYC
 
-                // Como esto solo se ejecuta una vez por línea (al tick 456),
-                // la interrupción solo se pide UNA VEZ.
+            if (MemoryMapped_IO.lcd.getLy() >= 144) {
+                setMode(1); // Entramos a V-Blank (evalúa la compuerta OR adentro de setMode)
                 Bus.intrp.request_interrupt(Interrupts.VBLANK);
-                if ((MemoryMapped_IO.lcd.getStat() & 0x10) != 0) {
-                    lcd_stat_delay += 4;
-                }
             } else {
                 // Si no es V-Blank, regresamos a OAM para la siguiente línea visible
                 setMode(2);
@@ -144,24 +176,13 @@ public class PPU {
         oam_blocked = false;
         vram_blocked = false;
         if (line_ticks >= 456) {
-            step_ly(); // Continuar contando líneas hasta 153
-
-            if (MemoryMapped_IO.lcd.getLy() >= 154) {
-                setMode(2);
-                MemoryMapped_IO.lcd.setLy(0); // Reinicio manual a 0
-                window_line = 0;
-
-                // -- Verificar coincidencia para la línea 0 --
-                if (MemoryMapped_IO.lcd.getLy() == MemoryMapped_IO.lcd.getLyc()) {
-                    MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() | 0x04);
-                    if ((MemoryMapped_IO.lcd.getStat() & 0x40) != 0) {
-                        lcd_stat_delay += 4;
-                    }
-                } else {
-                    MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() & ~0x04);
-                }
-            }
             line_ticks = 0;
+            step_ly(); // Incrementa LY (y si pasa de 153 a 0, lo envuelve limpio antes de evaluar LYC)
+
+            // Si step_ly() envolvió LY de vuelta a la línea 0, salimos de V-Blank hacia Modo 2
+            if (MemoryMapped_IO.lcd.getLy() == 0) {
+                setMode(2);
+            }
         }
     }
 
@@ -172,18 +193,13 @@ public class PPU {
         lineSprites.clear(); // Limpiar la estructura de datos
         // Los sprites pueden ser de 8x8 o de 8x16
         int height = (MemoryMapped_IO.lcd.getLcdc() & 0x04) != 0 ? 16 : 8;
-        // Máximo 10 sprites por línea 7 y 40 objetos (160 bytes, 4 bytes por objeto)
+        // Máximo 10 sprites por línea y 40 objetos (160 bytes, 4 bytes por objeto)
         for (int i = 0; i < 40 && lineSprites.size() < 10; ++i) {
-            // Como cada objeto ocupa 4 bytes, el índice se debe multiplicar por 4 para el offset
-            // Es un array de estructuras, en este caso la estructura es el objeto
             int y = oam_ram[(i << 2)] & 0xFF;
             int x = oam_ram[(i << 2) + 1] & 0xFF;
             int tile = oam_ram[(i << 2) + 2] & 0xFF;
             int flags = oam_ram[(i << 2) + 3] & 0xFF;
-            // Para permitir entrada y salida fluida de la pantalla, las coordenadas 0,0 no corresponden al 0,0 de pantalla
-            // La coordenada Y determina si el sprite será dibujado, la coordenada x determina dónde
-            // Por eso se agrega el sprite a memoria solo si aplicando la compensación para y entra
-            // De x nos encargamos cuando sea momento de dibujar
+
             if (y <= MemoryMapped_IO.lcd.getLy() + 16 && y + height > MemoryMapped_IO.lcd.getLy() + 16) {
                 lineSprites.add(new SpriteEntry(y, x, tile, flags));
             }
@@ -193,26 +209,32 @@ public class PPU {
     }
 
     /*
-     * Avanza el contador de líneas y gestiona la lógica de coincidencia LYC.
+     * Avanza el contador de líneas, actualiza el bit 2 (LY == LYC) y evalúa la compuerta OR.
      */
     private void step_ly() {
         // Lógica de Window interna
-        // Si la ventana es visible y está en la zona de dibujarse
         if (isWinVisible() && MemoryMapped_IO.lcd.getLy() >= MemoryMapped_IO.lcd.getWinY()) {
             window_line++;
         }
-        MemoryMapped_IO.lcd.setLy(MemoryMapped_IO.lcd.getLy() + 1);
 
-        // Lógica de coincidencia LY == LYC (Bit 2 del STAT)
-        if (MemoryMapped_IO.lcd.getLy() == MemoryMapped_IO.lcd.getLyc()) {
-            MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() | 0x04); // Ponemos el bit 2 en 1
-            if ((MemoryMapped_IO.lcd.getStat() & 0x40) != 0) {
-                // STAT INT por LYC
-                lcd_stat_delay += 4;
-            }
-        } else {
-            MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() & ~0x04); // Si LY != LYC mantenemos apagado el bit 2
+        int nextLy = MemoryMapped_IO.lcd.getLy() + 1;
+
+        // Envolver de 153 -> 0 ANTES de evaluar LY == LYC para no generar un falso flanco en 154
+        if (nextLy >= 154) {
+            nextLy = 0;
+            window_line = 0;
         }
+        MemoryMapped_IO.lcd.setLy(nextLy);
+
+        // Actualizar el Bit 2 de STAT (Coincidencia LY == LYC)
+        if (MemoryMapped_IO.lcd.getLy() == MemoryMapped_IO.lcd.getLyc()) {
+            MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() | 0x04);
+        } else {
+            MemoryMapped_IO.lcd.setStat(MemoryMapped_IO.lcd.getStat() & ~0x04);
+        }
+
+        // Pasamos la nueva señal por el circuito de compuertas AND/OR
+        update_stat_irq();
     }
 
     // -- MÉTODOS DE UTILIDAD Y ACCESO --
@@ -222,17 +244,12 @@ public class PPU {
     public void setMode(int m) {
         MemoryMapped_IO.lcd.regs[0x01] = (MemoryMapped_IO.lcd.getStat() & ~0x03) | (m & 0x03);
 
-        // -- INTERRUPCIÓN POR CAMBIO DE MODO --
-        int currentStat = MemoryMapped_IO.lcd.getStat();
-        boolean interruptRequested = false;
+        // Sincronizar bloqueo de VRAM/OAM al instante del cambio de modo
+        oam_blocked  = (m == 2 || m == 3);
+        vram_blocked = (m == 3);
 
-        if (m == 0 && (currentStat & 0x08) != 0) interruptRequested = true; // Modo 0 (H-Blank)
-        if (m == 1 && (currentStat & 0x10) != 0) interruptRequested = true; // Modo 1 (V-Blank, extra STAT int)
-        if (m == 2 && (currentStat & 0x20) != 0) interruptRequested = true; // Modo 2 (OAM)
-
-        if (interruptRequested) {
-            lcd_stat_delay += 4;
-        }
+        // Pasamos el nuevo modo por el circuito de compuertas AND/OR
+        update_stat_irq();
     }
 
     public boolean isWinVisible() {
@@ -264,7 +281,6 @@ public class PPU {
         int finalAddr = address - 0xFE00;
         if (finalAddr < 0 || finalAddr >= 0xA0) return 0xFF;
         return oam_ram[finalAddr] & 0xFF;
-
     }
     public void oam_write(int address, int value) {
         int finalAddr = address - 0xFE00;

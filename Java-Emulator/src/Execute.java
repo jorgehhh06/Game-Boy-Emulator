@@ -48,9 +48,10 @@ public class Execute {
                 if (instr.reg_1 == Instructions_Enum.RegType.RT_A) {
                     cpu.write_reg(instr.reg_1, cpu.getFetchData());
                 } else {
-                // LDH se usa para escribir IO del Hardware por medio del bus
+                // LDH se usa para escribir IO del Hardware por medio del
+                    cpu.cycle(3);
                     Bus.bus_write(cpu.getMemDest(), cpu.getFetchData());
-                    cpu.cycle(4);
+                    cpu.cycle(1);
                 }
                 break;
 
@@ -152,8 +153,9 @@ public class Execute {
                 if (check_condition(cpu, instr.cond)) {
                     int lo = cpu.stack_pop(); // stack_pop ya cobra 4 ticks
                     int hi = cpu.stack_pop(); // stack_pop ya cobra 4 ticks
+                    cpu.cycle(3);
                     cpu.setPC(((hi << 8) | lo) & 0xFFFF);
-                    cpu.cycle(4); // Se debió usar el bus para poner el PC
+                    cpu.cycle(1); // Se debió usar el bus para poner el PC
                 }
                 break;
 
@@ -163,8 +165,9 @@ public class Execute {
                 int lo_reti = cpu.stack_pop(); // 4 ticks
                 int hi_reti = cpu.stack_pop(); // 4 ticks
 
+                cpu.cycle(3);
                 cpu.setPC((hi_reti << 8) | lo_reti);
-                cpu.cycle(4); // Hardware delay, bus de direcciones
+                cpu.cycle(1); // Hardware delay, bus de direcciones
                 break;
 
             case IN_POP: // Sacar algo de la pila
@@ -274,8 +277,9 @@ public class Execute {
             case IN_JR: // Jump Relative
                 byte relative_addr = (byte)(cpu.getFetchData() & 0xFF);
                 if (check_condition(cpu, instr.cond)) {
+                    cpu.cycle(3);
                     cpu.setPC(cpu.getPC() + relative_addr);
-                    cpu.cycle(4); // Ciclo extra por el salto
+                    cpu.cycle(1); // Ciclo extra por el salto
                 }
                 break;
 
@@ -351,8 +355,9 @@ public class Execute {
                 cpu.stack_push((pc_to_push >> 8) & 0xFF);
                 cpu.stack_push(pc_to_push & 0xFF);
             }
+            cpu.cycle(3);
             cpu.setPC(addr);
-            cpu.cycle(4); // Delay final del salto
+            cpu.cycle(1); // Delay final del salto
         }
     }
 
@@ -363,14 +368,17 @@ public class Execute {
             if (instr.type == Instructions_Enum.InType.IN_LD && instr.reg_2 == Instructions_Enum.RegType.RT_SP) {
                 int spVal = cpu.read_reg(Instructions_Enum.RegType.RT_SP); // Valor en el SP
                 // Escritura en dos partes
+                cpu.cycle(3);
                 Bus.bus_write(cpu.getMemDest(), spVal & 0xFF);
-                cpu.cycle(4);
+                cpu.cycle(1);
+                cpu.cycle(3);
                 Bus.bus_write((cpu.getMemDest() + 1) & 0xFFFF, (spVal >> 8) & 0xFF);
-                cpu.cycle(4);
+                cpu.cycle(1);
             } else {
                 // El resto es de 8 bits
+                cpu.cycle(3);
                 Bus.bus_write(cpu.getMemDest(), cpu.getFetchData() & 0xFF); // Se escribe el valor en el bus
-                cpu.cycle(4);
+                cpu.cycle(1);
             }
             return;
         }
@@ -388,8 +396,9 @@ public class Execute {
             setFlags(cpu, 0, 0, h, c);
 
             // (byte) hace que sea interpretado como complemento a 2
+            cpu.cycle(3);
             cpu.write_reg(instr.reg_1, (r1 + (byte)r2) & 0xFFFF);
-            cpu.cycle(4);
+            cpu.cycle(1);
             return;
         }
 
@@ -405,8 +414,9 @@ public class Execute {
         // FIX: INC (HL) opera en 8 bits, no debe sufrir el delay de is16Bit()
         if (instr.reg_1 == Instructions_Enum.RegType.RT_HL && instr.mode == Instructions_Enum.AddrMode.AM_MR) {
             int val = (cpu.getFetchData() + 1) & 0xFF;
+            cpu.cycle(3);
             Bus.bus_write(cpu.read_reg(Instructions_Enum.RegType.RT_HL), val);
-            cpu.cycle(4);
+            cpu.cycle(1);
             setFlags(cpu, val == 0 ? 1 : 0, 0, (val & 0x0F) == 0 ? 1 : 0, -1);
             return; // Salimos inmediatamente
         }
@@ -430,8 +440,9 @@ public class Execute {
         // FIX: DEC (HL) opera en 8 bits, no debe sufrir el delay de is16Bit()
         if (instr.reg_1 == Instructions_Enum.RegType.RT_HL && instr.mode == Instructions_Enum.AddrMode.AM_MR) {
             int val = (cpu.getFetchData() - 1) & 0xFF;
+            cpu.cycle(3);
             Bus.bus_write(cpu.read_reg(Instructions_Enum.RegType.RT_HL), val);
-            cpu.cycle(4);
+            cpu.cycle(1);
             setFlags(cpu, val == 0 ? 1 : 0, 1, (val & 0x0F) == 0x0F ? 1 : 0, -1);
             return; // Salimos inmediatamente
         }
