@@ -126,11 +126,12 @@ public class CPU {
         }
 
         if (CPUctx.halted) {
+            cycle(4); // Estado de bajo consumo, pasa el tiempo
             // HALT despierta si hay CUALQUIER interrupción pendiente (IE & IF != 0)
             if (Bus.intrp.has_pending_interrupts()) {
                 CPUctx.halted = false;
+                return;
             } else {
-                cycle(4);
                 return; // Si sigue dormida, el oscilador sigue corriendo
             }
         }
