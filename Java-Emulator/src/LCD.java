@@ -63,6 +63,7 @@ public class LCD {
     // 00 = blanco, 01 = gris claro, 10 = gris xoscuro, 11 = negro, 2 bits para 4 colores
     private static final int[] COLORS_DEFAULT = {0xFF9BBC0F, 0xFF8BAC0F, 0xFF306230, 0xFF0F380F};
     //private static final int[] COLORS_DEFAULT = {0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000};
+    //private static final int[] COLORS_DEFAULT = {0xFFFFB3C1, 0xFFFF8FA3, 0xFFFF758F, 0xFFFF4D6D};
 
     public int getLcdc() { return regs[0x00]; }
     public int getStat() { return regs[0x01]; }

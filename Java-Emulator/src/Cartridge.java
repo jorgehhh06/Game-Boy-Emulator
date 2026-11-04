@@ -1,13 +1,19 @@
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 
 /*
- * Extrae la información del cartucho y se encarga de gestionar los datos de lectura/escritura, guardado y memory banking.
- * Ahora soporta MBC1, MBC3 y MBC5.
+ * Extrae la información del cartucho y se encarga de gestionar los datos de
+ * lectura/escritura, guardado con batería y memory banking.
+ *
+ * Soporta: ROM ONLY, MBC1, MBC2, MBC3 (con RTC completo para Pokémon Oro/Plata/Cristal) y MBC5.
  */
-
 public class Cartridge {
+
     // Estructura del Header
     public static class RomHeader {
         public String title;
@@ -35,19 +41,21 @@ public class Cartridge {
     private boolean sram_enabled = false;
     private int rom_bank_value = 1;
     private int rom_bank_offset = 0x4000;
-    private int banking_mode = 0; // Solo usado por MBC1
+    private int banking_mode = 0; // Solo usado por MBC1 (0 = ROM Mode, 1 = RAM/Advanced Mode)
 
     // -- Variables para el Reloj de Tiempo Real (RTC) del MBC3 --
     private boolean rtc_latch_prep = false;
-    private long latched_time = 0;
+    private final int[] rtc_regs = new int[5];         // 0:Seg, 1:Min, 2:Horas, 3:Días(Low), 4:Días(High)+Flags
+    private final int[] latched_rtc_regs = new int[5]; // Copia congelada al hacer Latch (0x00 -> 0x01)
+    private long rtc_last_time = System.currentTimeMillis() / 1000;
 
     // -- Static RAM (SRAM) --
-    private int [][] sram_banks;
+    private int[][] sram_banks;
     private int current_sram_bank = 0;
 
     // -- Guardado con batería --
-    boolean has_battery = false;
-    boolean needs_save = false;
+    public boolean has_battery = false;
+    public boolean needs_save = false;
 
     // Tipos de cartucho
     private static final String[] ROM_TYPES = {
@@ -192,68 +200,64 @@ public class Cartridge {
     }
 
     public int cart_read(int address) {
-        // ROM Banco 0
+        address &= 0xFFFF;
+
+        // ROM Banco 0 (0x0000 - 0x3FFF)
         if (address < 0x4000) {
-            // En modo 1 (Avanzado), el bloque inferior se desplaza según los bits altos,
-            // pero SIEMPRE enmascarado a la cantidad real de bancos de la ROM (en 512KB es 0x1F, por lo que queda en 0).
+            // En MBC1 modo 1 (Avanzado), el banco 0 puede desplazarse a 0x20, 0x40 o 0x60 en ROMs > 512KB
             if (isMBC1 && banking_mode == 1) {
                 int total_rom_banks = rom_data.length / 0x4000;
                 int mask = (total_rom_banks > 0) ? (total_rom_banks - 1) : 0;
                 int bank0 = (rom_bank_value & 0x60) & mask;
                 int target = (bank0 * 0x4000) + address;
-                return (target < rom_data.length) ? rom_data[target] & 0xFF : 0xFF;
+                return (target < rom_data.length) ? (rom_data[target] & 0xFF) : 0xFF;
             }
             return rom_data[address] & 0xFF;
         }
-        // ROM Banco Variable
+        // ROM Banco Variable (0x4000 - 0x7FFF)
         else if (address < 0x8000) {
             int target = rom_bank_offset + (address - 0x4000);
-            return (target < rom_data.length) ? rom_data[target] & 0xFF : 0xFF;
+            return (target < rom_data.length) ? (rom_data[target] & 0xFF) : 0xFF;
         }
-        // SRAM / RTC
-        else if (address < 0xC000) {
+        // SRAM / RTC (0xA000 - 0xBFFF)
+        else if (address >= 0xA000 && address < 0xC000) {
             if (!sram_enabled) return 0xFF;
 
-            // CASO MBC2
+            // CASO MBC2: 512 nibbles con mirroring en 0xA000-0xBFFF y bits 4-7 en 1
             if (isMBC2) {
-                // Solo 512 bytes disponibles, se repite (mirroring) en el rango 0xA000-0xBFFF
-                // Devuelve nibble bajo. Los bits 4-7 siempre devuelven 1 en hardware real.
                 return (sram_banks[0][address & 0x1FF] & 0x0F) | 0xF0;
             }
 
-            // CASO MBC1, 3, 5 (Memoria RAM estándar)
-            if (sram_banks != null && sram_banks.length > 0 && current_sram_bank < 0x08) {
-                int target_bank = current_sram_bank % sram_banks.length;
-                if (isMBC1 && banking_mode == 0) target_bank = 0;
-                return sram_banks[target_bank][address - 0xA000] & 0xFF;
+            // CASO MBC3 RTC: Bancos 0x08 a 0x0C devuelven los registros LATCHED del reloj
+            if (isMBC3 && current_sram_bank >= 0x08 && current_sram_bank <= 0x0C) {
+                return latched_rtc_regs[current_sram_bank - 0x08] & 0xFF;
             }
 
-            // FIX MBC3: Simulación RTC utilizando el valor "Latched" para no desfasar el reloj en lecturas lentas
-            if (isMBC3 && current_sram_bank >= 0x08 && current_sram_bank <= 0x0C) {
-                long t = latched_time;
-                switch (current_sram_bank) {
-                    case 0x08: return (int)(t % 60) & 0xFF; // Segundos
-                    case 0x09: return (int)((t / 60) % 60) & 0xFF; // Minutos
-                    case 0x0A: return (int)((t / 3600) % 24) & 0xFF; // Horas
-                    case 0x0B: return (int)((t / 86400) % 256) & 0xFF; // Días (Byte bajo)
-                    case 0x0C: return (int)((t / 86400) / 256) & 0xFF; // Días (Byte alto) + Flags
+            // CASO MBC1, MBC3, MBC5 (Memoria SRAM estándar)
+            if (sram_banks != null && sram_banks.length > 0 && current_sram_bank < 0x08) {
+                int target_bank = current_sram_bank % sram_banks.length;
+                if (isMBC1 && banking_mode == 0) {
+                    target_bank = 0;
                 }
+                return sram_banks[target_bank][address - 0xA000] & 0xFF;
             }
         }
         return 0xFF;
     }
 
     public void cart_write(int address, int value) {
-        // -- CONTROL DE BANKING (0x0000 - 0x3FFF) --
+        address &= 0xFFFF;
+        value &= 0xFF;
+
+        // -- CONTROL DE BANKING Y HABILITACIÓN DE RAM (0x0000 - 0x3FFF) --
         if (address < 0x4000) {
             if (isMBC2) {
-                // Si el bit 8 de la dirección es 0: Control de RAM
+                // En MBC2 el bit 8 de la dirección decide entre RAM Enable (0) y ROM Bank (1)
                 if ((address & 0x0100) == 0) {
                     sram_enabled = ((value & 0x0F) == 0x0A);
-                }
-                // Si el bit 8 de la dirección es 1: Cambio de Banco ROM
-                else {
+                } else {
                     rom_bank_value = value & 0x0F;
+                    if (rom_bank_value == 0) rom_bank_value = 1;
                     update_rom_bank();
                 }
             }
@@ -268,21 +272,22 @@ public class Cartridge {
                 }
             }
             else if (isMBC3) {
-                if (address < 0x2000) sram_enabled = ((value & 0x0F) == 0x0A);
-                else {
+                if (address < 0x2000) {
+                    sram_enabled = ((value & 0x0F) == 0x0A);
+                } else {
                     rom_bank_value = value & 0x7F;
                     if (rom_bank_value == 0) rom_bank_value = 1;
                     update_rom_bank();
                 }
             }
             else if (isMBC5) {
-                if (address < 0x2000) sram_enabled = ((value & 0x0F) == 0x0A);
-                else if (address < 0x3000) {
-                    rom_bank_value = (rom_bank_value & 0x100) | (value & 0xFF);
+                if (address < 0x2000) {
+                    sram_enabled = ((value & 0x0F) == 0x0A);
+                } else if (address < 0x3000) {
+                    rom_bank_value = (rom_bank_value & 0x100) | value;
                     update_rom_bank();
-                }
-                else {
-                    rom_bank_value = (rom_bank_value & 0xFF) | ((value & 1) << 8);
+                } else {
+                    rom_bank_value = (rom_bank_value & 0xFF) | ((value & 0x01) << 8);
                     update_rom_bank();
                 }
             }
@@ -296,22 +301,26 @@ public class Cartridge {
                 rom_bank_value = (rom_bank_value & 0x1F) | (val << 5);
                 update_rom_bank();
             }
-            else if (isMBC3) current_sram_bank = value;
-            else if (isMBC5) current_sram_bank = value & 0x0F;
+            else if (isMBC3) {
+                current_sram_bank = value;
+            }
+            else if (isMBC5) {
+                current_sram_bank = value & 0x0F;
+            }
         }
 
-        // -- CAMBIO DE MODO / LATCH RTC (0x6000 - 0x7FFF) --
+        // -- CAMBIO DE MODO (MBC1) / LATCH DEL RTC (MBC3) (0x6000 - 0x7FFF) --
         else if (address < 0x8000) {
             if (isMBC1) {
                 banking_mode = value & 0x01;
             }
-            // FIX MBC3: Máquina de estados para capturar el tiempo exacto (Latch)
             else if (isMBC3) {
                 if (value == 0x00) {
                     rtc_latch_prep = true;
                 } else if (value == 0x01) {
                     if (rtc_latch_prep) {
-                        latched_time = System.currentTimeMillis() / 1000;
+                        update_rtc();
+                        System.arraycopy(rtc_regs, 0, latched_rtc_regs, 0, 5);
                     }
                     rtc_latch_prep = false;
                 } else {
@@ -320,37 +329,102 @@ public class Cartridge {
             }
         }
 
-        // -- ESCRITURA EN SRAM (0xA000 - 0xBFFF) --
-        else if (address < 0xC000) {
-            if (sram_enabled && sram_banks != null) {
+        // -- ESCRITURA EN SRAM / RTC (0xA000 - 0xBFFF) --
+        else if (address >= 0xA000 && address < 0xC000) {
+            if (!sram_enabled) return;
+
+            // Escritura en los registros del RTC del MBC3 (0x08 - 0x0C)
+            if (isMBC3 && current_sram_bank >= 0x08 && current_sram_bank <= 0x0C) {
+                update_rtc();
+                int reg = current_sram_bank - 0x08;
+                switch (reg) {
+                    case 0:
+                        rtc_regs[0] = value & 0x3F; // Segundos (0-59)
+                        rtc_last_time = System.currentTimeMillis() / 1000;
+                        break;
+                    case 1:
+                        rtc_regs[1] = value & 0x3F; // Minutos (0-59)
+                        break;
+                    case 2:
+                        rtc_regs[2] = value & 0x1F; // Horas (0-23)
+                        break;
+                    case 3:
+                        rtc_regs[3] = value & 0xFF; // Días (bits 0-7)
+                        break;
+                    case 4:
+                        rtc_regs[4] = value & 0xC1; // Bit 0: Día bit 8 | Bit 6: Halt | Bit 7: Day Carry
+                        break;
+                }
+                latched_rtc_regs[reg] = rtc_regs[reg];
+                needs_save = true;
+                return;
+            }
+
+            // Escritura en SRAM normal o interna de MBC2
+            if (sram_banks != null) {
                 if (isMBC2) {
-                    // FIX MBC2: Guardamos forzando los bits altos a 1 para integridad de datos físicos
                     sram_banks[0][address & 0x1FF] = (value & 0x0F) | 0xF0;
+                    needs_save = true;
                 } else if (sram_banks.length > 0 && current_sram_bank < 0x08) {
                     int target_bank = current_sram_bank % sram_banks.length;
-                    if (isMBC1 && banking_mode == 0) target_bank = 0;
-                    sram_banks[target_bank][address - 0xA000] = value & 0xFF;
+                    if (isMBC1 && banking_mode == 0) {
+                        target_bank = 0;
+                    }
+                    sram_banks[target_bank][address - 0xA000] = value;
+                    needs_save = true;
                 }
-                needs_save = true;
             }
         }
     }
 
-    // Función auxiliar para centralizar la máscara de bits y evitar el bug de Multicarts
+    // Avanza el reloj interno del MBC3 según el tiempo real transcurrido
+    private void update_rtc() {
+        long now = System.currentTimeMillis() / 1000;
+        long elapsed = now - rtc_last_time;
+        rtc_last_time = now;
+
+        // Si el bit 6 (0x40) del registro 0x0C está activo, el reloj está en HALT (pausado)
+        if ((rtc_regs[4] & 0x40) != 0 || elapsed <= 0) {
+            return;
+        }
+
+        long totalSeconds = elapsed + rtc_regs[0];
+        rtc_regs[0] = (int) (totalSeconds % 60);
+
+        long totalMinutes = (totalSeconds / 60) + rtc_regs[1];
+        rtc_regs[1] = (int) (totalMinutes % 60);
+
+        long totalHours = (totalMinutes / 60) + rtc_regs[2];
+        rtc_regs[2] = (int) (totalHours % 24);
+
+        long elapsedDays = totalHours / 24;
+        if (elapsedDays > 0) {
+            int currentDays = (rtc_regs[3] & 0xFF) | ((rtc_regs[4] & 0x01) << 8);
+            long totalDays = currentDays + elapsedDays;
+
+            if (totalDays > 511) {
+                rtc_regs[4] |= 0x80; // Activar Bit 7 (Day Counter Carry / Overflow)
+                totalDays %= 512;
+            }
+
+            rtc_regs[3] = (int) (totalDays & 0xFF);
+            rtc_regs[4] = (rtc_regs[4] & 0xFE) | (int) ((totalDays >> 8) & 0x01);
+        }
+    }
+
+    // Actualiza el offset del banco ROM actual aplicando la máscara del tamaño físico del cartucho
     private void update_rom_bank() {
         int total_rom_banks = rom_data.length / 0x4000;
         if (total_rom_banks > 0) {
-            // En MBC1, el ajuste de 0 -> 1 ocurre sobre los 5 bits bajos ANTES de enmascarar con el tamaño de la ROM
             int bank = rom_bank_value;
-            if (!isMBC5 && (bank & 0x1F) == 0) {
+            // EXCLUSIVO de MBC1: si los 5 bits bajos son 0 (0x00, 0x20, 0x40, 0x60), suma 1.
+            // En MBC3 los bancos 0x20, 0x40 y 0x60 son completamente válidos.
+            if (isMBC1 && (bank & 0x1F) == 0) {
                 bank |= 1;
             }
 
-            // total_rom_banks siempre es potencia de 2 (2, 4, 8, 16, 32, 64, 128...)
-            // Para 32 bancos (512 KB), la máscara correcta es 31 (0x1F), NO 63 (0x3F)
             int mask = total_rom_banks - 1;
             int effective_bank = bank & mask;
-
             rom_bank_offset = effective_bank * 0x4000;
         }
     }
@@ -365,50 +439,74 @@ public class Cartridge {
         isMBC5 = (type >= 0x19 && type <= 0x1E);
 
         if (isMBC2) {
-            // El MBC2 tiene 512 bytes de RAM interna (en realidad 512 nibbles)
+            // El MBC2 tiene 512 nibbles de RAM integrada en el propio chip
             sram_banks = new int[1][512];
-            for(int i = 0; i < 512; i++) sram_banks[0][i] = 0x0F; // Inicializar a 1s
+            for (int i = 0; i < 512; i++) {
+                sram_banks[0][i] = 0xFF;
+            }
             System.out.println("Hardware: MBC2 Internal RAM (512 nibbles)");
         } else {
-            // Lógica estándar para otros MBCs
             int num_banks = 0;
             switch (header.ram_size) {
                 case 0: num_banks = 0; break;
-                case 2: num_banks = 1; break;
-                case 3: num_banks = 4; break;
-                case 4: num_banks = 16; break;
-                case 5: num_banks = 8; break;
+                case 1: num_banks = 1; break; // 2KB (algunos homebrew/prototipos)
+                case 2: num_banks = 1; break; // 8KB
+                case 3: num_banks = 4; break; // 32KB (4 bancos de 8KB)
+                case 4: num_banks = 16; break; // 128KB (16 bancos de 8KB)
+                case 5: num_banks = 8; break; // 64KB (8 bancos de 8KB)
             }
 
             if (num_banks > 0) {
                 sram_banks = new int[num_banks][0x2000];
                 for (int i = 0; i < num_banks; i++) {
-                    for (int j = 0; j < 0x2000; j++) sram_banks[i][j] = 0xFF;
+                    for (int j = 0; j < 0x2000; j++) {
+                        sram_banks[i][j] = 0xFF;
+                    }
                 }
                 System.out.println("SRAM: " + num_banks + " bancos de 8KB");
             }
         }
-        System.out.printf("Hardware detectado -> MBC1: %b | MBC2: %b | MBC3: %b | MBC5: %b\n", isMBC1, isMBC2, isMBC3, isMBC5);
+        System.out.printf("Hardware detectado -> MBC1: %b | MBC2: %b | MBC3: %b | MBC5: %b\n",
+                isMBC1, isMBC2, isMBC3, isMBC5);
     }
 
     private void check_battery() {
         int t = header.type;
-        // Tipos con batería en MBC1, MBC2, MBC3, MBC5 y ROM+RAM
-        this.has_battery = (t == 3 || t == 6 || t == 9 || t == 0x0F || t == 0x10 || t == 0x13 || t == 0x1B || t == 0x1E);
+        this.has_battery = (t == 0x03 || t == 0x06 || t == 0x09 || t == 0x0D ||
+                t == 0x0F || t == 0x10 || t == 0x13 || t == 0x1B || t == 0x1E);
+    }
+
+    // Genera la ruta .sav de forma segura sin riesgo de sobrescribir la ROM original
+    private String getSavePath() {
+        if (filename.matches("(?i).*\\.gbc?$")) {
+            return filename.replaceAll("(?i)\\.gbc?$", ".sav");
+        }
+        return filename + ".sav";
     }
 
     public void load_battery() {
         if (!has_battery) return;
-        String savePath = filename.replace(".gb", ".sav");
-        try (java.io.InputStream is = new java.io.FileInputStream(savePath)) {
-            for (int i = 0; i < sram_banks.length; i++) {
-                byte[] temp = new byte[0x2000];
-                int bytesRead = is.read(temp);
-                if (bytesRead > 0) {
-                    for (int j = 0; j < bytesRead; j++) {
-                        sram_banks[i][j] = temp[j] & 0xFF;
+        String savePath = getSavePath();
+
+        try (DataInputStream dis = new DataInputStream(new FileInputStream(savePath))) {
+            if (sram_banks != null) {
+                for (int i = 0; i < sram_banks.length; i++) {
+                    byte[] temp = new byte[sram_banks[i].length];
+                    int bytesRead = dis.read(temp);
+                    if (bytesRead > 0) {
+                        for (int j = 0; j < bytesRead; j++) {
+                            sram_banks[i][j] = temp[j] & 0xFF;
+                        }
                     }
                 }
+            }
+
+            // Si es MBC3 y el .sav incluye los 48 bytes del estado del RTC al final
+            if (isMBC3 && dis.available() >= 48) {
+                for (int i = 0; i < 5; i++) rtc_regs[i] = dis.readInt() & 0xFF;
+                for (int i = 0; i < 5; i++) latched_rtc_regs[i] = dis.readInt() & 0xFF;
+                rtc_last_time = dis.readLong();
+                update_rtc(); // Avanza el reloj por todo el tiempo que el emulador estuvo cerrado
             }
             System.out.println("Partida cargada desde: " + savePath);
         } catch (IOException e) {
@@ -417,15 +515,26 @@ public class Cartridge {
     }
 
     public void save_battery() {
-        if (!has_battery || sram_banks == null) return;
-        String savePath = filename.replace(".gb", ".sav");
-        try (java.io.OutputStream os = new java.io.FileOutputStream(savePath)) {
-            for (int[] bank : sram_banks) {
-                byte[] temp = new byte[bank.length];
-                for (int i = 0; i < bank.length; i++) {
-                    temp[i] = (byte) bank[i];
+        if (!has_battery) return;
+        String savePath = getSavePath();
+
+        try (DataOutputStream dos = new DataOutputStream(new FileOutputStream(savePath))) {
+            if (sram_banks != null) {
+                for (int[] bank : sram_banks) {
+                    byte[] temp = new byte[bank.length];
+                    for (int i = 0; i < bank.length; i++) {
+                        temp[i] = (byte) bank[i];
+                    }
+                    dos.write(temp);
                 }
-                os.write(temp);
+            }
+
+            // Persistir el estado del RTC al final del archivo .sav (48 bytes)
+            if (isMBC3) {
+                update_rtc();
+                for (int i = 0; i < 5; i++) dos.writeInt(rtc_regs[i]);
+                for (int i = 0; i < 5; i++) dos.writeInt(latched_rtc_regs[i]);
+                dos.writeLong(rtc_last_time);
             }
             System.out.println("Partida guardada en: " + savePath);
         } catch (IOException e) {
