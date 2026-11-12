@@ -58,9 +58,10 @@ public class Bus {
             if (dma.dma_transferring()) return 0xFF;
             return currentRam.read_wram(address);
         }
-        // 0xE000 - 0xFDFF: Echo RAM (Generalmente ignorada)
+        // 0xE000 - 0xFDFF: Echo RAM, espejo de WRAM
         else if (address < 0xFE00) {
-            return 0xFF;
+            if (dma.dma_transferring()) return 0xFF;
+            return currentRam.read_wram(address - 0x2000);
         }
         // 0xFE00 - 0xFE9F: OAM (Sprites)
         else if (address < 0xFEA0) {
@@ -108,7 +109,9 @@ public class Bus {
             currentRam.write_wram(address, value);
         }
         else if (address < 0xFE00) {
-            // Echo RAM - No se escribe
+            // Echo RAM, espejo de los primeros 7.5KBs de la wram
+            if (dma.dma_transferring()) return;
+            currentRam.write_wram(address - 0x2000, value);
         }
         else if (address < 0xFEA0) {
             if (dma.dma_transferring() || ppu.get_oam_blocked()) return;
@@ -154,9 +157,9 @@ public class Bus {
         else if (address < 0xE000) {
             return currentRam.read_wram(address);
         }
-        // 0xE000 - 0xFDFF: Echo RAM (Generalmente ignorada)
+        // 0xE000 - 0xFDFF: Echo RAM espejo de WRAM
         else if (address < 0xFE00) {
-            return 0xFF;
+            return currentRam.read_wram(address - 0x2000);
         }
         // 0xFE00 - 0xFE9F: OAM (Sprites)
         else if (address < 0xFEA0) {
